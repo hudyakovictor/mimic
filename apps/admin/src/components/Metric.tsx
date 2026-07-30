@@ -1,0 +1,1 @@
+export function Metric({label,value,detail,tone='default'}:{label:string;value:string;detail:string;tone?:'default'|'risk'|'good'}){return <article className={`metric metric--${tone}`}><div className="metric__label">{label}</div><div className="metric__value">{value}</div><div className="metric__detail">{detail}</div></article>}

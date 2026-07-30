@@ -1,0 +1,71 @@
+openapi: 3.1.0
+info: {title: MimicGuard API, version: 0.1.0}
+paths:
+  /v1/analysis-jobs:
+    post:
+      summary: Register an analysis job after a video upload is completed
+      operationId: createAnalysisJob
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateAnalysisJob'}
+      responses:
+        '202':
+          description: Accepted
+          content: {application/json: {schema: {$ref: '#/components/schemas/AnalysisJob'}}}
+  /v1/analysis-jobs/{jobId}:
+    get:
+      summary: Get job state and decision summary
+      operationId: getAnalysisJob
+      parameters: [{name: jobId, in: path, required: true, schema: {type: string, format: uuid}}]
+      responses:
+        '200': {description: Found, content: {application/json: {schema: {$ref: '#/components/schemas/AnalysisJob'}}}}
+        '404': {description: Not found}
+  /v1/reviews/{decisionId}:
+    post:
+      summary: Record a human review without mutating the original decision
+      operationId: createReview
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/CreateReview'}}}}
+      responses: {'201': {description: Created}}
+components:
+  schemas:
+    CreateAnalysisJob:
+      type: object
+      required: [assetId, claimedPersonId]
+      properties:
+        assetId: {type: string, format: uuid}
+        claimedPersonId: {type: string, format: uuid}
+        correlationId: {type: string, maxLength: 128}
+    AnalysisJob:
+      type: object
+      required: [id, status, createdAt]
+      properties:
+        id: {type: string, format: uuid}
+        status: {enum: [QUEUED, RUNNING, SUCCEEDED, FAILED, INSUFFICIENT_DATA]}
+        createdAt: {type: string, format: date-time}
+        decision: {$ref: '#/components/schemas/Decision'}
+    Decision:
+      type: object
+      required: [label, riskScore, qualityScore, modelVersion, evidence]
+      properties:
+        label: {enum: [CONSISTENT, SUSPICIOUS, INSUFFICIENT_DATA]}
+        riskScore: {type: number, minimum: 0, maximum: 1}
+        qualityScore: {type: number, minimum: 0, maximum: 1}
+        modelVersion: {type: string}
+        evidence: {type: array, items: {$ref: '#/components/schemas/Evidence'}}
+    Evidence:
+      type: object
+      required: [code, contribution, message]
+      properties:
+        code: {type: string}
+        contribution: {type: number, minimum: -1, maximum: 1}
+        message: {type: string}
+        startMs: {type: integer, minimum: 0}
+        endMs: {type: integer, minimum: 0}
+    CreateReview:
+      type: object
+      required: [verdict, reason]
+      properties:
+        verdict: {enum: [CONFIRMED_GENUINE, CONFIRMED_SUSPICIOUS, UNDECIDABLE]}
+        reason: {type: string, minLength: 10, maxLength: 2000}
