@@ -1,4 +1,6 @@
+import itertools
 from statistics import fmean
+
 from .domain import LandmarkSequence, QualityAssessment, QualityFailure
 
 MIN_FRAMES = 15
@@ -20,7 +22,7 @@ def assess_quality(sequence: LandmarkSequence) -> QualityAssessment:
     mean_confidence = fmean(f.confidence for f in frames) if frames else 0.0
     if mean_confidence < MIN_MEAN_CONFIDENCE:
         failures.append(QualityFailure.LOW_TRACKING_CONFIDENCE)
-    gaps = [b.timestamp_ms - a.timestamp_ms for a, b in zip(frames, frames[1:])]
+    gaps = [b.timestamp_ms - a.timestamp_ms for a, b in itertools.pairwise(frames)]
     max_gap = max(gaps, default=0)
     if max_gap > MAX_GAP_MS:
         failures.append(QualityFailure.EXCESSIVE_GAPS)

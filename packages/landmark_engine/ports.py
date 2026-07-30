@@ -1,5 +1,7 @@
-from typing import Protocol, BinaryIO
+from typing import BinaryIO, Protocol
+
 from .domain import LandmarkSequence, NormalizedSequence
+
 
 class LandmarkExtractor(Protocol):
     """Adapter boundary for MediaPipe or another landmark detector."""
