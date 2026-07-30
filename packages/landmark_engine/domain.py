@@ -1,6 +1,7 @@
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Mapping, Sequence
+
 
 class QualityFailure(StrEnum):
     TOO_FEW_FRAMES = "TOO_FEW_FRAMES"

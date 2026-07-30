@@ -1,0 +1,57 @@
+# MimicGuard — git ignore
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+*.db
+*.sqlite
+*.sqlite3
+.venv/
+venv/
+env/
+
+# Node
+node_modules/
+.pnpm-store/
+.vite/
+dist/
+# Lock files are kept (commit package-lock.json / pnpm-lock.yaml)
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Env
+.env
+.env.local
+.env.*.local
+
+# Test artifacts
+coverage/
+.coverage
+htmlcov/
+.nyc_output/
+playwright-report/
+test-results/
+
+# Local data
+data/
+*.log
+logs/
+
+# CI/CD
+.nox/
+.nox-*/

@@ -1,4 +1,5 @@
 from math import hypot
+
 from .domain import LandmarkSequence, NormalizedFrame, NormalizedSequence
 
 # Stable MediaPipe-like anchor IDs; adapters must map their schema to these semantic anchors.

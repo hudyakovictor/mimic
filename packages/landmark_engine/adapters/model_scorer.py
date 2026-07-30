@@ -1,5 +1,6 @@
 from ..domain import NormalizedSequence
 
+
 class VersionedMotionScorer:
     """Production scoring adapter contract.
 

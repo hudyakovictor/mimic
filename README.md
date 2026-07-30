@@ -1,52 +1,139 @@
-# MimicGuard Landmarks
+# MimicGuard
 
-Production-oriented monorepo scaffold for detecting anomalous facial motion in low-quality video using **only facial landmarks and their temporal dynamics**.
+**Система выявления несоответствия динамики лица заявленного человека его верифицированному motion-baseline** — для low-quality видео (webcams, телефоны, плохое освещение, сжатие). Цель — помощь ревьюеру в выявлении случаев, когда среди видео находится человек в силиконовой маске, у которого мимика отличается от baseline-человека.
 
-> Status: architecture baseline. Contracts, boundaries, validation and admin UI shell are implemented. ML extraction, training and production scoring are explicit adapters that raise `NotImplementedError` until a validated model is supplied.
+> **v1 использует только семантические landmarks лица (MediaPipe Face Mesh) и их временные производные.** Это не универсальный детектор масок — это инструмент, который:
+> 1. Накапливает verified-прогоны произнесённых слов;
+> 2. Сравнивает новое видео с baseline-человеком по каждому слову;
+> 3. Выдаёт evidence (DTW, Mahalanobis, phase delay, slope);
+> 4. Позволяет ревьюеру side-by-side сравнить 2-4 прогона с overlay landmarks.
 
-## 80/20 product scope
+## Архитектура
 
-The first release intentionally solves the five capabilities that create most of the value:
-
-1. ingest and track video-analysis jobs;
-2. validate landmark sequence quality;
-3. normalize motion against head pose, scale and frame rate;
-4. compare a probe sequence with a verified person baseline by phoneme/word context;
-5. review explainable risk signals in a React administration console.
-
-Not in v1: texture, rPPG, optical flow, emotion recognition, general-purpose surveillance, automatic identity enrollment from unreviewed video.
-
-## Repository map
-
-- `apps/admin` — React 19 + TypeScript administration console.
-- `services/api` — FastAPI application and application services.
-- `packages/landmark_engine` — domain algorithms and replaceable ML ports.
-- `packages/contracts` — API/event contracts and enums.
-- `docs` — architecture, data model, security, testing and delivery documentation.
-- `infra` — local Docker topology and observability placeholders.
-
-## Start here
-
-1. Read `docs/01-product-scope.md`.
-2. Read `docs/02-architecture.md` and `docs/03-domain-model.md`.
-3. Use `docs/12-implementation-roadmap.md` as the delivery sequence.
-4. Every placeholder is marked `MG-STUB` and must either remain an explicit failure or be replaced by a tested implementation.
-
-## Local development target
-
-```bash
-cp .env.example .env
-make bootstrap
-make dev
+```
+React Admin (apps/admin)  ──►  FastAPI (services/api)  ──►  PostgreSQL
+                                                              │
+                                                              ▼
+                              Redis Streams  ◄──────────  dramatiq worker
+                                                              │
+                                                              ▼
+                              MinIO/S3  ◄────────────  landmarks.npz, видео
 ```
 
-The commands are documented contracts. Dependency installation is intentionally not executed by the scaffold generator.
+- **Backend:** FastAPI (Python 3.12) + SQLAlchemy 2.0 async + Alembic.
+- **Worker:** dramatiq + Redis Streams.
+- **ML:** MediaPipe Face Mesh (478 точек), faster-whisper (ASR), DTW + Mahalanobis (статистический baseline).
+- **Frontend:** React 19 + Vite 6 + TypeScript + TanStack Query + Zod.
+- **Storage:** S3-совместимый (MinIO в dev).
 
-## Architectural rules
+## Возможности
 
-- Raw videos never become training data automatically.
-- Unknown or poor-quality input returns `INSUFFICIENT_DATA`, not a forced verdict.
-- API handlers contain no domain decisions.
-- Feature schemas and model versions are immutable once used in a decision.
-- Every score is accompanied by evidence, quality and model version.
-- Landmark extraction is a replaceable port; MediaPipe is the reference adapter, not a domain dependency.
+- Загрузка видео (файл, прямая mp4-ссылка, YouTube через yt-dlp).
+- Пайплайн из 6 стадий: validate → extract_landmarks → quality_gate → asr → align → match_baseline.
+- Накопительная база слов/словосочетаний: каждое CONFIRMED_GENUINE ревью инкрементит версию шаблона (DTW + Mahalanobis по региональным фичам).
+- **Canvas-overlay синхронный просмотр** 1-4 видео с overlay landmarks (MediaPipe Face Mesh skeleton + точки) — на странице сравнения анализа и на странице сравнения прогонов слова.
+- RBAC (5 ролей), audit log, JWT auth, rate limiting.
+- Model registry с promotion/rollback.
+- Observability: Prometheus metrics, OpenTelemetry traces, structured JSON logs.
+- Docker-compose для dev (Postgres + Redis + MinIO + API + worker + Prometheus + Grafana).
+
+## Запуск
+
+```bash
+# 1. Зависимости
+uv sync --all-extras
+cd apps/admin && pnpm install && cd ../..
+
+# 2. Переменные окружения
+cp .env.example .env
+# (опционально: измените JWT_SECRET, S3 keys, и т.д.)
+
+# 3. Инфраструктура
+docker compose -f infra/docker-compose.yml up -d postgres redis minio
+
+# 4. Миграции и seed
+uv run --directory services/api alembic upgrade head
+uv run --directory services/api python -m scripts.seed
+
+# 5. API
+uv run --directory services/api uvicorn app.main:app --reload --port 8080
+
+# 6. Worker (в другом терминале)
+uv run dramatiq services.worker.app.broker -p 2 -t 4
+
+# 7. Frontend
+cd apps/admin && pnpm dev   # http://localhost:5173
+```
+
+Default admin: `admin@local` / `change-me-now-12chars`.
+
+## Структура проекта
+
+```
+mimic/
+├── apps/
+│   └── admin/                  React 19 + TS админка
+│       ├── src/
+│       │   ├── pages/          16 страниц (Dashboard, Analyses, Words, Phrases, ...)
+│       │   ├── components/     UI компоненты
+│       │   │   └── SyncPlayer  Canvas-overlay синхронный плеер
+│       │   ├── api/            Typed HTTP client + Zod schemas
+│       │   ├── stores/         Zustand (auth, toasts)
+│       │   └── styles/         CSS (light/dark, a11y)
+├── services/
+│   ├── api/                    FastAPI application
+│   │   ├── app/
+│   │   │   ├── routers/        11 routers, ~40 endpoints
+│   │   │   ├── services/       Application services (auth, jobs, assets, words, reviews, baseline aggregator)
+│   │   │   ├── repositories/   SQLAlchemy repositories с tenant scoping
+│   │   │   ├── db/             Models + session management
+│   │   │   ├── security/       JWT, passwords, RBAC
+│   │   │   ├── storage/        S3 client, key generators
+│   │   │   ├── events/         Outbox + Redis publisher
+│   │   │   └── observability/  Logging, metrics, tracing
+│   │   └── alembic/            Migrations
+│   └── worker/                 dramatiq worker
+│       └── app/
+│           ├── actors/         Pipeline actor (6 stages)
+│           ├── landmarks/      MediaPipe Face Mesh
+│           ├── asr/            faster-whisper
+│           ├── phoneme/        Word-to-landmark alignment
+│           ├── baseline/       DTW + Mahalanobis
+│           └── video/          ffmpeg probe + decode
+├── packages/
+│   ├── landmark_engine/        Framework-independent domain (LandmarkFrame, NormalizedSequence, QualityAssessment)
+│   └── contracts/              OpenAPI + event schemas
+├── docs/                       Полная документация
+│   ├── 01-14                   Vision, design, operations
+│   ├── adr/                    Architectural decision records
+│   ├── modules/                Спецификации каждого модуля с заглушками
+│   └── 14-runbooks/            Incident runbooks
+├── infra/                      Docker, Prometheus
+├── scripts/                    seed.py
+└── Makefile                    bootstrap, dev, test, lint, typecheck
+```
+
+## Тестирование
+
+```bash
+# Backend
+uv run --directory services/api pytest -q ../..
+uv run --directory services/api ruff check .
+uv run --directory services/api mypy app packages
+
+# Frontend
+cd apps/admin && pnpm typecheck && pnpm lint
+```
+
+## Документация
+
+- `docs/01-product-scope.md` — что делаем / не делаем.
+- `docs/02-architecture.md` — модульный монолит + worker.
+- `docs/04-landmark-pipeline.md` — пайплайн landmarks.
+- `docs/modules/` — спецификации модулей (включая заглушки с подробными docstring).
+- `docs/14-runbooks/` — incident runbooks.
+- `docs/quality-scorecard.md` — 50-факторный scorecard.
+- `docs/adr/` — architectural decision records.
+
+## Лицензия
+TBD (internal).

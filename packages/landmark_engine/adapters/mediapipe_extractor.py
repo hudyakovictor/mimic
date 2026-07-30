@@ -1,5 +1,7 @@
 from typing import BinaryIO
+
 from ..domain import LandmarkSequence
+
 
 class MediaPipeLandmarkExtractor:
     """Reference extraction adapter.

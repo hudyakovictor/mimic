@@ -1,36 +1,61 @@
 # Product scope
 
 ## Product decision
-The system does not promise universal mask detection. It detects **inconsistency between a claimed person's verified facial-motion baseline and a new landmark sequence**, and exposes the evidence to a reviewer.
+Система выявляет **несоответствие динамики лица заявленного человека его верифицированному motion-baseline**. Это *не* универсальный детектор масок и *не* идентификация. Это инструмент для ревьюера, который получает evidence: качество трека, score несхожести с baseline по конкретным словам, временные интервалы аномалий.
+
+## Ключевая гипотеза
+Силиконовая маска с высокой вероятностью не воспроизводит мелкую моторику нижней части лица. При произнесении одинаковых слов/словосочетаний baseline-человек показывает воспроизводимые паттерны (точность до 10–30 мс и амплитуд ±10%), тогда как человек в маске:
+- отстаёт по фазе (`MOUTH_CHEEK_LAG`);
+- имеет сниженную амплитуду челюсти (`JAW_RANGE_LOW`);
+- показывает асимметрию губ (`LIP_ASYMMETRY`);
+- смещённое общее время артикуляции (`MOTION_TIMING_SHIFT`).
+
+Если для одного и того же слова/словосочетания накопить ≥10 verified-сессий, можно построить статистическую модель нормы и сравнивать новое видео с ней.
 
 ## Primary user journeys
-1. Operator registers an uploaded video and claimed subject.
-2. System extracts one stable face track and evaluates data quality.
-3. Accepted motion is normalized and compared with verified baselines.
-4. Reviewer sees a risk score, quality, anomalies and time ranges.
-5. Reviewer records a verdict; the original model decision remains immutable.
+1. **Оператор** загружает видео (файл, прямая ссылка mp4, или YouTube) и указывает заявленного человека.
+2. Система:
+   - скачивает/декодирует видео;
+   - трекает одно лицо (Face Mesh, 478 точек);
+   - прогоняет quality gate;
+   - нормализует (pose, scale, time);
+   - распознаёт речь (faster-whisper);
+   - выравнивает слова на таймлайн;
+   - для каждого распознанного слова ищет шаблоны в baseline заявленного человека;
+   - считает DTW-distance + Mahalanobis-distance;
+   - формирует decision + evidence с временными интервалами.
+3. **Ревьюер** открывает страницу анализа:
+   - видит синхронное side-by-side видео с overlay landmarks;
+   - переключается между конкретными словами/словосочетаниями;
+   - видит накопленные baseline-версии слова (несколько прогонов);
+   - подтверждает или отвергает решение, указывая причину.
+4. Решение + ревью попадают в audit log и в quarantine dataset для последующего retrain.
 
 ## v1 must-have
-- explicit job lifecycle and retries;
-- quality rejection rather than forced decisions;
-- versioned landmark/feature schemas;
-- subject baseline isolation;
-- evidence with time ranges;
-- RBAC and append-only audit;
-- React queue, decision and review workflow;
-- model/version registry.
+- job lifecycle с явными состояниями и retry;
+- quality rejection (`INSUFFICIENT_DATA`) вместо принудительного вердикта;
+- версионированные landmark/feature schemas;
+- изоляция baseline по человеку;
+- evidence с временными интервалами и contribution-score;
+- RBAC + append-only audit;
+- React-очередь, decision, ревью-флоу;
+- registry моделей с rollback;
+- **накопительная база произнесённых слов/словосочетаний** с возможностью визуального сравнения нескольких прогонов;
+- **canvas-overlay** для синхронного воспроизведения нескольких видео с overlay landmarks.
 
 ## Non-goals
-- emotion or intent detection;
-- identification of unknown people;
-- covert surveillance;
-- texture/depth/rPPG analysis;
-- automatic training from reviewer actions;
-- a single confidence value without quality/evidence.
+- emotion/intent detection;
+- идентификация неизвестных людей;
+- скрытое наблюдение;
+- texture/depth/rPPG;
+- автоматический retrain из reviewer actions;
+- single confidence value без quality/evidence.
 
 ## Success metrics
-- 95% of accepted jobs complete inside five minutes for a ten-minute video;
-- zero silent fallback to an unversioned model;
-- every decision reproducible from asset hash, feature version and model checksum;
-- reviewers can complete a decision in under two minutes;
-- quality gate false acceptance tracked separately from model performance.
+- **p95 принятых задач завершается ≤5 мин для 10-мин видео** на Apple M-series;
+- 0 silent fallback на неверсионированную модель;
+- каждое решение воспроизводимо по `(asset_sha256, feature_version, model_checksum)`;
+- ревьюер завершает решение за ≤2 мин;
+- quality-gate false-acceptance отслеживается отдельно от точности модели;
+- **95% recall на validation-наборе синтетических силиконовых масок** (измеряется отдельно на синтетике + на reviewed-выборке);
+- baseline накапливается: накапливаем слова/словосочетания в БД, ≥10 прогонов → статистически значимая норма.
