@@ -2,6 +2,7 @@
 
 MG-STUB: final.
 """
+
 from __future__ import annotations
 
 import uuid
@@ -11,8 +12,13 @@ def asset_key(tenant_id: uuid.UUID, asset_id: uuid.UUID, ext: str = "mp4") -> st
     return f"{tenant_id}/videos/{asset_id}.{ext.lstrip('.')}"
 
 
+def staging_asset_key(tenant_id: uuid.UUID, asset_id: uuid.UUID, ext: str = "mp4") -> str:
+    """Temporary source key; bucket lifecycle removes abandoned uploads."""
+    return f"staging/{tenant_id}/{asset_id}.{ext.lstrip('.')}"
+
+
 def landmarks_key(tenant_id: uuid.UUID, job_id: uuid.UUID) -> str:
-    return f"{tenant_id}/derived/{job_id}/landmarks.mgml"
+    return f"{tenant_id}/derived/{job_id}/landmarks.mgml.gz"
 
 
 def landmarks_npz_key(tenant_id: uuid.UUID, job_id: uuid.UUID) -> str:
@@ -23,12 +29,16 @@ def transcript_key(tenant_id: uuid.UUID, job_id: uuid.UUID) -> str:
     return f"{tenant_id}/derived/{job_id}/transcript.json"
 
 
+def normalized_landmarks_key(tenant_id: uuid.UUID, job_id: uuid.UUID) -> str:
+    return f"{tenant_id}/derived/{job_id}/normalized.npy"
+
+
 def features_key(tenant_id: uuid.UUID, job_id: uuid.UUID) -> str:
     return f"{tenant_id}/derived/{job_id}/features.npz"
 
 
 def phrase_landmarks_key(tenant_id: uuid.UUID, sample_id: uuid.UUID) -> str:
-    return f"{tenant_id}/clips/{sample_id}/landmarks.mgml"
+    return f"{tenant_id}/clips/{sample_id}/landmarks.mgml.gz"
 
 
 def clip_key(tenant_id: uuid.UUID, sample_id: uuid.UUID) -> str:

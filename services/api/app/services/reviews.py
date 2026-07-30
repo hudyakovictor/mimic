@@ -1,6 +1,8 @@
 """Review service + Baseline aggregator (called on review.created.v1)."""
+
 from __future__ import annotations
 
+import gzip
 import io
 import json
 import uuid
@@ -9,7 +11,7 @@ import numpy as np
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..db.models import Decision, PhraseTemplate, Review, User
+from ..db.models import Decision, PhraseSample, PhraseTemplate, Review, User
 from ..errors import NotFoundError, ValidationFailedError
 from ..events.outbox import OutboxRepository
 from ..observability import PHRASE_TEMPLATES_TOTAL, get_logger
@@ -22,6 +24,7 @@ from ..repositories.decisions import (
 from ..settings import get_settings
 from ..storage import BUCKET_CLIPS, BUCKET_DERIVED
 from ..storage.keys import (
+    normalized_landmarks_key,
     phrase_landmarks_key,
     template_cov_key,
     template_curve_key,
@@ -130,6 +133,12 @@ class BaselineAggregator:
         decision = await self.session.get(Decision, review.decision_id)
         if decision is None:
             return None
+        already_aggregated = await self.session.scalar(
+            select(PhraseSample.id).where(PhraseSample.review_id == review_id).limit(1)
+        )
+        if already_aggregated is not None:
+            log.info("baseline.review_already_aggregated", review_id=str(review_id))
+            return None
         # Load landmarks
         from ..db.models import AnalysisJob, LandmarkSequence
 
@@ -144,8 +153,17 @@ class BaselineAggregator:
             log.warning("baseline.no_landmarks", job_id=str(decision.job_id))
             return None
         landmarks_bytes = await s3.get_object(BUCKET_DERIVED, lm.object_key)
-        landmarks = self._parse_npz(landmarks_bytes)
-        if landmarks is None:
+        raw_landmarks = self._parse_npz(landmarks_bytes)
+        try:
+            normalized_bytes = await s3.get_object(
+                BUCKET_DERIVED,
+                normalized_landmarks_key(self.tenant_id, decision.job_id),
+            )
+            normalized_landmarks = np.load(io.BytesIO(normalized_bytes))
+        except Exception as exc:
+            log.warning("baseline.no_normalized_landmarks", job_id=str(decision.job_id), error=str(exc))
+            return None
+        if raw_landmarks is None or normalized_landmarks.ndim != 2:
             return None
         # Update templates per word
         phrase_instances = decision.phrase_instances or []
@@ -161,7 +179,10 @@ class BaselineAggregator:
                 subject_id=job.subject_id,
                 start_ms=int(inst.get("start_ms", 0)),
                 end_ms=int(inst.get("end_ms", 0)),
-                landmarks=landmarks,
+                normalized_landmarks=normalized_landmarks,
+                raw_landmarks=raw_landmarks,
+                source_fps=lm.source_fps,
+                sample_confidence=float(inst.get("confidence", 0.0)),
                 review_id=review_id,
                 decision_id=decision.id,
                 settings=settings,
@@ -193,58 +214,86 @@ class BaselineAggregator:
         subject_id: uuid.UUID | None,
         start_ms: int,
         end_ms: int,
-        landmarks: np.ndarray,
+        normalized_landmarks: np.ndarray,
+        raw_landmarks: np.ndarray,
+        source_fps: float,
+        sample_confidence: float,
         review_id: uuid.UUID,
         decision_id: uuid.UUID,
         settings,
         s3: S3Client,
     ) -> PhraseTemplate | None:
-        # Slice landmarks by time
-        sliced = self._slice_landmarks_by_time(landmarks, start_ms, end_ms)
-        if sliced is None or len(sliced) < 10:
+        # Do not let uncertain ASR labels poison a word-specific baseline.
+        if sample_confidence < 0.65:
+            return None
+        # Templates use the same normalized 33-dimensional schema as scoring.
+        # Raw 478-point frames are retained only for reviewer overlay.
+        sliced = self._slice_landmarks_by_time(normalized_landmarks, start_ms, end_ms, source_fps)
+        raw_sliced = self._slice_landmarks_by_time(raw_landmarks, start_ms, end_ms, source_fps)
+        if sliced is None or raw_sliced is None or len(sliced) < 10:
             return None
         n_frames = len(sliced)
-        # Extract features (regional)
         features = self._extract_features(sliced)
-        # Find existing active template
         latest = await self.templates.get_latest_active(word, language, subject_id)
-        all_samples: list[np.ndarray] = []
-        all_features: list[np.ndarray] = []
+        sample_curve = self._resample(sliced, 30).astype(np.float32)
+        if sample_curve.ndim != 2 or sample_curve.shape[1] == 0:
+            return None
+
+        old_n = 0
+        old_curve: np.ndarray | None = None
+        old_cov: np.ndarray | None = None
         if latest is not None:
             try:
-                old_curve = np.load(io.BytesIO(await s3.get_object(BUCKET_DERIVED, latest.mean_curve_object_key)))
-                all_samples.append(old_curve)
-                all_features.append(np.array(list(latest.regional_stats.values())))
-            except Exception:
-                pass
-        all_samples.append(sliced)
-        all_features.append(features)
-        # Resample all to fixed length 30 frames
-        target_len = 30
-        resampled = [self._resample(s, target_len) for s in all_samples]
-        # Cap at MAX_N
+                old_curve = np.load(
+                    io.BytesIO(await s3.get_object(BUCKET_DERIVED, latest.mean_curve_object_key))
+                ).astype(np.float32)
+                old_cov = np.load(
+                    io.BytesIO(await s3.get_object(BUCKET_DERIVED, latest.cov_diag_object_key))
+                ).astype(np.float32)
+                if old_curve.shape != sample_curve.shape or old_cov.shape != sample_curve.shape:
+                    raise ValueError("feature schema shape changed")
+                old_n = max(0, int(latest.n_samples))
+            except Exception as exc:
+                log.warning(
+                    "baseline.previous_template_unreadable", template_id=str(latest.id), error=str(exc)
+                )
+                old_curve = None
+                old_cov = None
+                old_n = 0
+
         max_n = settings.phrase_template_max_samples
-        if len(resampled) > max_n:
-            resampled = resampled[-max_n:]
-        new_n = len(resampled)
-        # Build mean curve
-        stack = np.stack(resampled, axis=0)  # (N, T, D)
-        if stack.shape[2] == 0:
-            return None
-        mean_curve = stack.mean(axis=0)
-        cov_diag = stack.var(axis=0)
-        # Regional stats from features
-        f_stack = np.stack(all_features, axis=0)
-        regional_stats = {
-            "mouth_open_mu": float(f_stack[:, 0].mean()),
-            "mouth_open_sigma": float(f_stack[:, 0].std() + 1e-6),
-            "mouth_ratio_mu": float(f_stack[:, 2].mean()),
-            "mouth_ratio_sigma": float(f_stack[:, 2].std() + 1e-6),
-            "lip_asym_mu": float(f_stack[:, 3].mean()),
-            "lip_asym_sigma": float(f_stack[:, 3].std() + 1e-6),
-            "jaw_open_mu": float(f_stack[:, 4].mean()),
-            "jaw_open_sigma": float(f_stack[:, 4].std() + 1e-6),
-        }
+        new_n = min(old_n + 1, max_n)
+        if old_curve is None or old_cov is None or old_n == 0:
+            mean_curve = sample_curve
+            cov_diag = np.zeros_like(sample_curve)
+        else:
+            # Online population mean/variance (Welford). Once MAX_N is reached,
+            # alpha=1/MAX_N becomes a bounded rolling approximation.
+            effective_old_n = min(old_n, max_n - 1) if old_n < max_n else max_n - 1
+            effective_new_n = max(1, effective_old_n + 1)
+            delta = sample_curve - old_curve
+            mean_curve = old_curve + delta / effective_new_n
+            cov_diag = (effective_old_n * old_cov + delta * (sample_curve - mean_curve)) / effective_new_n
+            cov_diag = np.maximum(cov_diag, 1e-8)
+
+        regional_stats: dict[str, float] = {}
+        for name, feature_index in (
+            ("mouth_open", 0),
+            ("mouth_ratio", 2),
+            ("lip_asym", 3),
+            ("jaw_open", 4),
+        ):
+            value = float(features[feature_index])
+            previous_mu = float((latest.regional_stats if latest else {}).get(f"{name}_mu", value))
+            previous_sigma = float((latest.regional_stats if latest else {}).get(f"{name}_sigma", 0.0))
+            if old_n <= 0:
+                mu, variance = value, 0.0
+            else:
+                weight = max(1, min(old_n + 1, max_n))
+                mu = previous_mu + (value - previous_mu) / weight
+                variance = ((weight - 1) * previous_sigma**2 + (value - previous_mu) * (value - mu)) / weight
+            regional_stats[f"{name}_mu"] = float(mu)
+            regional_stats[f"{name}_sigma"] = float(max(variance, 0.0) ** 0.5 + 1e-6)
         # Persist artifacts
         new_id = uuid.uuid4()
         curve_key = template_curve_key(self.tenant_id, new_id)
@@ -255,27 +304,8 @@ class BaselineAggregator:
         np.save(cov_buf, cov_diag)
         await s3.put_object(BUCKET_DERIVED, curve_key, curve_buf.getvalue(), "application/octet-stream")
         await s3.put_object(BUCKET_DERIVED, cov_key, cov_buf.getvalue(), "application/octet-stream")
-        # PhraseSample
-        sample_key = phrase_landmarks_key(self.tenant_id, new_id)
-        await s3.put_object(
-            BUCKET_CLIPS, sample_key, sliced.astype(np.float32).tobytes(), "application/octet-stream"
-        )
-        sample = await self.samples.create(
-            template_id=new_id,  # will be overwritten
-            decision_id=decision_id,
-            review_id=review_id,
-            word=word,
-            language=language,
-            start_ms=start_ms,
-            end_ms=end_ms,
-            video_clip_object_key="",
-            landmarks_object_key=sample_key,
-            audio_clip_object_key=None,
-            confidence=0.0,
-            n_frames=n_frames,
-            mean_dtw_to_template=None,
-        )
-        # PhraseTemplate
+        # Create the template before its FK-bound sample. IDs are chosen up
+        # front so object keys and database rows remain reproducible.
         is_mature = new_n >= settings.phrase_baseline_mature_samples
         tpl = await self.templates.create_version(
             word=word,
@@ -287,12 +317,37 @@ class BaselineAggregator:
             mean_curve_object_key=curve_key,
             cov_diag_object_key=cov_key,
             regional_stats=regional_stats,
-            model_version="statistical-v1",
+            model_version="statistical-v2",
             is_mature=is_mature,
+            template_id=new_id,
         )
-        # Fix sample template_id to real tpl.id
-        sample.template_id = tpl.id
-        await self.session.flush()
+        sample_id = uuid.uuid4()
+        sample_key = phrase_landmarks_key(self.tenant_id, sample_id)
+        await s3.put_object(
+            BUCKET_CLIPS,
+            sample_key,
+            gzip.compress(
+                self._serialize_landmarks(raw_sliced, source_fps),
+                compresslevel=6,
+            ),
+            "application/gzip",
+        )
+        await self.samples.create(
+            template_id=tpl.id,
+            decision_id=decision_id,
+            review_id=review_id,
+            word=word,
+            language=language,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            video_clip_object_key="",
+            landmarks_object_key=sample_key,
+            audio_clip_object_key=None,
+            confidence=max(0.0, min(1.0, sample_confidence)),
+            n_frames=n_frames,
+            mean_dtw_to_template=None,
+            sample_id=sample_id,
+        )
         return tpl
 
     @staticmethod
@@ -303,6 +358,8 @@ class BaselineAggregator:
         or (T, 33) for normalized.
         """
         try:
+            if blob.startswith(b"\x1f\x8b"):
+                blob = gzip.decompress(blob)
             # Find newline
             nl = blob.find(b"\n")
             if nl < 0:
@@ -310,46 +367,60 @@ class BaselineAggregator:
             header = json.loads(blob[:nl].decode())
             shape = tuple(header["shape"])
             dtype = np.dtype(header.get("dtype", "float32"))
-            arr = np.frombuffer(blob[nl + 1 :], dtype=dtype).reshape(shape)
-            return arr
+            value_count = int(np.prod(shape))
+            arr = np.frombuffer(blob, dtype=dtype, count=value_count, offset=nl + 1).reshape(shape)
+            return arr.copy()
         except Exception as e:
             log.warning("baseline.parse_npz_failed", error=str(e))
             return None
 
     @staticmethod
     def _slice_landmarks_by_time(
-        landmarks: np.ndarray, start_ms: int, end_ms: int
+        landmarks: np.ndarray,
+        start_ms: int,
+        end_ms: int,
+        source_fps: float = 30.0,
     ) -> np.ndarray | None:
-        """Slice by frame index. landmarks is (T, D) or (T, N, 3).
+        """Slice normalized or raw landmarks using the measured source cadence."""
+        if landmarks.ndim not in (2, 3):
+            return None
+        frame_count = landmarks.shape[0]
+        fps = max(1e-3, source_fps)
+        start_index = int(start_ms / 1000 * fps)
+        end_index = int(np.ceil(end_ms / 1000 * fps))
+        start_index = max(0, min(frame_count, start_index))
+        end_index = max(start_index + 1, min(frame_count, end_index))
+        return landmarks[start_index:end_index]
 
-        For now we assume uniform 30 fps and slicing by approximate index.
-        Caller can later provide a time-indexed array.
-        """
-        if landmarks.ndim == 2:
-            T = landmarks.shape[0]
-            i0 = int(start_ms / 1000 * 30)
-            i1 = int(end_ms / 1000 * 30)
-            i0 = max(0, min(T, i0))
-            i1 = max(i0 + 1, min(T, i1))
-            return landmarks[i0:i1]
-        elif landmarks.ndim == 3:
-            T = landmarks.shape[0]
-            i0 = int(start_ms / 1000 * 30)
-            i1 = int(end_ms / 1000 * 30)
-            i0 = max(0, min(T, i0))
-            i1 = max(i0 + 1, min(T, i1))
-            return landmarks[i0:i1].reshape(i1 - i0, -1)
-        return None
+    @staticmethod
+    def _serialize_landmarks(raw_landmarks: np.ndarray, source_fps: float) -> bytes:
+        """Serialize a phrase overlay in the same MGML format as the worker."""
+        frames = raw_landmarks.astype(np.float32, copy=False)
+        frame_count = frames.shape[0]
+        meta = np.zeros((frame_count, 4), dtype=np.float32)
+        meta[:, 0] = np.arange(frame_count, dtype=np.float32) * 1000 / max(source_fps, 1e-3)
+        meta[:, 1] = 1.0
+        header = json.dumps(
+            {
+                "shape": list(frames.shape),
+                "dtype": "float32",
+                "schema": "mediapipe-v1",
+                "fps": float(source_fps),
+                "meta_shape": list(meta.shape),
+            },
+            separators=(",", ":"),
+        ).encode()
+        return header + b"\n" + frames.tobytes() + meta.tobytes()
 
     @staticmethod
     def _resample(arr: np.ndarray, target_len: int) -> np.ndarray:
         """Linear interpolation resample to fixed length."""
         from scipy.interpolate import interp1d
 
-        T = arr.shape[0]
-        if T == target_len:
+        frame_count = arr.shape[0]
+        if frame_count == target_len:
             return arr
-        x_old = np.linspace(0, 1, T)
+        x_old = np.linspace(0, 1, frame_count)
         x_new = np.linspace(0, 1, target_len)
         if arr.ndim == 1:
             return np.interp(x_new, x_old, arr)
@@ -378,7 +449,7 @@ class BaselineAggregator:
         # 27: jaw_r_x, 28: _y
         # 31: cheek_upper_l_y
         # 37: cheek_upper_r_y
-        # (we only have 33 dims; cheek_upper_r is at 36 in 11-point × 3 + offset, but for simplicity)
+        # (33 dims only; cheek_upper_r would be at 36 in 11-point x 3 + offset)
         if arr.shape[1] >= 33:
             v = arr
         else:

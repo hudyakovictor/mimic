@@ -5,10 +5,10 @@ require process restart. Secrets are typed as SecretStr to prevent accidental
 leakage in logs.
 """
 from functools import lru_cache
-from typing import Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import Field, SecretStr
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, SecretStr, field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -28,7 +28,9 @@ class Settings(BaseSettings):
     api_host: str = "0.0.0.0"
     api_port: int = 8080
     api_base_url: str = "http://localhost:8080"
-    cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173"])
+    cors_origins: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["http://localhost:5173"]
+    )
     rate_limit_rps: int = 10
 
     # Database
@@ -61,6 +63,7 @@ class Settings(BaseSettings):
     # Upload limits
     max_upload_bytes: int = 1_073_741_824
     max_video_duration_seconds: int = 1800
+    max_selected_duration_seconds: int = 1200
 
     # MediaPipe
     mediapipe_model_path: str | None = None
@@ -102,6 +105,13 @@ class Settings(BaseSettings):
     default_admin_email: str = "admin@local"
     default_admin_password: str = "change-me-now-12chars"
     default_tenant_slug: str = "default"
+
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def parse_cors_origins(cls, value: Any) -> Any:
+        if isinstance(value, str) and not value.lstrip().startswith("["):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return value
 
 
 @lru_cache(maxsize=1)

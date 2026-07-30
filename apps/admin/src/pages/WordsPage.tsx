@@ -7,9 +7,19 @@ import { formatRelative } from '../lib/format';
 export function WordsPage() {
   const [search, setSearch] = useState('');
   const [language, setLanguage] = useState('');
+  const [subjectId, setSubjectId] = useState('');
+  const { data: subjects = [] } = useQuery({
+    queryKey: ['subjects'],
+    queryFn: () => api.listSubjects(),
+  });
   const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ['words', { language }],
-    queryFn: () => api.listWords({ language: language || undefined, limit: 200 }),
+    queryKey: ['words', { language, subjectId }],
+    queryFn: () =>
+      api.listWords({
+        language: language || undefined,
+        subjectId: subjectId || undefined,
+        limit: 200,
+      }),
   });
 
   const filtered = (data ?? []).filter((w) =>
@@ -39,6 +49,14 @@ export function WordsPage() {
           <option value="en">English</option>
           <option value="ru">Русский</option>
         </select>
+        <select className="select" value={subjectId} onChange={(e) => setSubjectId(e.target.value)}>
+          <option value="">Все субъекты</option>
+          {subjects.map((subject) => (
+            <option key={subject.id} value={subject.id}>
+              {subject.displayName || subject.externalId}
+            </option>
+          ))}
+        </select>
         <span className="spacer" />
         <small className="muted">Всего: {filtered.length}</small>
         <button className="btn btn--secondary btn--sm" onClick={() => refetch()}>
@@ -65,6 +83,7 @@ export function WordsPage() {
                 <tr>
                   <th>Слово</th>
                   <th>Язык</th>
+                  <th>Субъект</th>
                   <th>Версий</th>
                   <th>Прогонов</th>
                   <th>Mature</th>
@@ -72,15 +91,22 @@ export function WordsPage() {
                 </tr>
               </thead>
               <tbody>
-                {filtered.map((w) => (
-                  <tr key={`${w.word}-${w.language}`}>
+                {filtered.map((w) => {
+                  const subject = subjects.find((item) => item.id === w.subjectId);
+                  const query = new URLSearchParams({ lang: w.language });
+                  if (w.subjectId) query.set('subject', w.subjectId);
+                  return (
+                    <tr key={`${w.word}-${w.language}-${w.subjectId ?? 'global'}`}>
                     <td>
-                      <Link to={`/words/${encodeURIComponent(w.word)}?lang=${w.language}`}>
+                      <Link to={`/words/${encodeURIComponent(w.word)}?${query.toString()}`}>
                         <strong>{w.word}</strong>
                       </Link>
                     </td>
                     <td>
                       <span className="badge badge--neutral">{w.language}</span>
+                    </td>
+                    <td className="text-xs">
+                      {subject?.displayName || subject?.externalId || w.subjectId?.slice(0, 8) || 'global'}
                     </td>
                     <td>{w.nTemplates}</td>
                     <td>{w.nSamples}</td>
@@ -94,8 +120,9 @@ export function WordsPage() {
                     <td>
                       <small>{formatRelative(w.lastUpdated)}</small>
                     </td>
-                  </tr>
-                ))}
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>

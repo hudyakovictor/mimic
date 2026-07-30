@@ -75,7 +75,7 @@ export const SubjectSchema = z.object({
 
 export const AssetSchema = z.object({
   id: z.string(),
-  sourceType: z.enum(['UPLOAD', 'YOUTUBE', 'URL']),
+  sourceType: z.enum(['UPLOAD', 'YOUTUBE', 'URL', 'CLIP']),
   sourceUrl: z.string().optional(),
   mime: z.string(),
   sizeBytes: z.number(),
@@ -88,12 +88,14 @@ export const AssetSchema = z.object({
   state: z.enum(['PENDING_UPLOAD', 'UPLOADING', 'READY', 'FAILED', 'DELETED']),
   title: z.string().optional(),
   failureReason: z.string().optional(),
+  extra: z.record(z.unknown()).default({}),
   createdAt: z.string(),
 });
 
 export const WordSummarySchema = z.object({
   word: z.string(),
   language: z.string(),
+  subjectId: z.string().optional(),
   nTemplates: z.number(),
   nSamples: z.number(),
   hasMatureBaseline: z.boolean(),

@@ -24,10 +24,12 @@ EXPECTED_PATHS = {
     "/v1/assets/{asset_id}/downloadUrl",
     "/v1/assets:prepareUpload",
     "/v1/assets/{asset_id}:completeUpload",
+    "/v1/assets/{asset_id}:createClips",
     "/v1/assets:importFromUrl",
     # Jobs
     "/v1/analysis-jobs",
     "/v1/analysis-jobs/{job_id}",
+    "/v1/analysis-jobs/{job_id}/artifacts",
     "/v1/analysis-jobs/{job_id}:cancel",
     "/v1/analysis-jobs/{job_id}:retry",
     # Subjects

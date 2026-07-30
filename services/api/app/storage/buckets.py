@@ -23,8 +23,12 @@ ALL_BUCKETS = [
 
 async def init_buckets(s3: S3Client) -> None:
     """Create all required buckets if missing."""
-    for b in ALL_BUCKETS:
-        await s3.ensure_bucket(b)
+    for bucket in ALL_BUCKETS:
+        await s3.ensure_bucket(bucket)
+    await s3.configure_staging_lifecycle(BUCKET_VIDEOS)
+    await s3.configure_browser_cors(BUCKET_VIDEOS, s3.settings.cors_origins)
+    await s3.configure_browser_cors(BUCKET_CLIPS, s3.settings.cors_origins)
+    await s3.configure_browser_cors(BUCKET_DERIVED, s3.settings.cors_origins)
 
 
 async def apply_lifecycle_policies(s3: S3Client) -> None:

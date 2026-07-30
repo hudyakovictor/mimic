@@ -131,7 +131,7 @@ export const api = {
   completeUpload: (
     assetId: string,
     body: {
-      sha256: string;
+      sha256?: string;
       etag?: string;
       durationMs?: number;
       width?: number;
@@ -157,6 +157,33 @@ export const api = {
       z.infer<typeof AssetSchema>[]
     >,
 
+  getAsset: (assetId: string) =>
+    request(`/v1/assets/${assetId}`, AssetSchema) as Promise<z.infer<typeof AssetSchema>>,
+
+  getAssetDownloadUrl: (assetId: string) =>
+    request(`/v1/assets/${assetId}/downloadUrl`, null) as Promise<{
+      url: string;
+      expiresIn: number;
+    }>,
+
+  createClips: (
+    assetId: string,
+    body: {
+      intervals: Array<{ startMs: number; endMs: number; label?: string }>;
+      deleteSource: boolean;
+    },
+  ) =>
+    request(`/v1/assets/${assetId}:createClips`, null, {
+      method: 'POST',
+      body: JSON.stringify(body),
+      idempotencyKey: crypto.randomUUID(),
+    }) as Promise<{
+      clips: z.infer<typeof AssetSchema>[];
+      sourceDeleted: boolean;
+      codecProfile: string;
+      totalDurationMs: number;
+    }>,
+
   // Jobs
   listJobs: (filters?: { state?: string; subjectId?: string; limit?: number; cursor?: string }) => {
     const params = new URLSearchParams();
@@ -172,6 +199,15 @@ export const api = {
 
   getJob: (id: string) =>
     request(`/v1/analysis-jobs/${id}`, AnalysisJobSchema) as Promise<z.infer<typeof AnalysisJobSchema>>,
+
+  getJobArtifacts: (id: string) =>
+    request(`/v1/analysis-jobs/${id}/artifacts`, null) as Promise<{
+      videoUrl: string;
+      landmarksUrl?: string;
+      durationMs: number;
+      fps: number;
+      expiresIn: number;
+    }>,
 
   createJob: (body: { assetId: string; claimedPersonId: string; pipelineVersion?: string }) =>
     request('/v1/analysis-jobs', AnalysisJobSchema, {
@@ -216,9 +252,10 @@ export const api = {
     }) as Promise<unknown>,
 
   // Words
-  listWords: (filters?: { language?: string; limit?: number; cursor?: string }) => {
+  listWords: (filters?: { language?: string; subjectId?: string; limit?: number; cursor?: string }) => {
     const params = new URLSearchParams();
     if (filters?.language) params.set('language', filters.language);
+    if (filters?.subjectId) params.set('subjectId', filters.subjectId);
     if (filters?.limit) params.set('limit', String(filters.limit));
     if (filters?.cursor) params.set('cursor', filters.cursor);
     const qs = params.toString();
@@ -227,19 +264,30 @@ export const api = {
     >;
   },
 
-  listTemplates: (word: string, language = 'en') =>
-    request(`/v1/words/${encodeURIComponent(word)}/templates?language=${language}`, z.array(PhraseTemplateSummarySchema)) as Promise<
-      z.infer<typeof PhraseTemplateSummarySchema>[]
-    >,
+  listTemplates: (word: string, language = 'en', subjectId?: string) => {
+    const query = new URLSearchParams({ language });
+    if (subjectId) query.set('subjectId', subjectId);
+    return request(
+      `/v1/words/${encodeURIComponent(word)}/templates?${query.toString()}`,
+      z.array(PhraseTemplateSummarySchema),
+    ) as Promise<z.infer<typeof PhraseTemplateSummarySchema>[]>;
+  },
 
   getTemplate: (word: string, templateId: string) =>
     request(`/v1/words/${encodeURIComponent(word)}/templates/${templateId}`, PhraseTemplateDetailSchema) as Promise<
       z.infer<typeof PhraseTemplateDetailSchema>
     >,
 
-  listSamplesForWord: (word: string, language = 'en', templateId?: string, _limit?: number) => {
+  listSamplesForWord: (
+    word: string,
+    language = 'en',
+    templateId?: string,
+    _limit?: number,
+    subjectId?: string,
+  ) => {
     const qs = new URLSearchParams({ language });
     if (templateId) qs.set('templateId', templateId);
+    if (subjectId) qs.set('subjectId', subjectId);
     return request(
       `/v1/words/${encodeURIComponent(word)}/samples?${qs.toString()}`,
       z.array(PhraseSampleSchema),
@@ -250,7 +298,14 @@ export const api = {
     request(
       `/v1/words/${encodeURIComponent(word)}/samples/${sampleId}/urls`,
       null,
-    ) as Promise<{ videoClipUrl: string; landmarksUrl: string; audioClipUrl?: string; expiresIn: number }>,
+    ) as Promise<{
+      videoClipUrl: string;
+      landmarksUrl: string;
+      audioClipUrl?: string;
+      videoInPointMs: number;
+      videoOutPointMs: number;
+      expiresIn: number;
+    }>,
 
   // Reviews
   listReviews: (filters?: { verdict?: string; reviewerId?: string; decisionId?: string; limit?: number; cursor?: string }) => {

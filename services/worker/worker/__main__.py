@@ -1,14 +1,16 @@
-"""Worker entrypoint.
+"""Dramatiq worker composition root.
 
-Run with:
-    PYTHONPATH=services/api:. dramatiq services.worker.worker.broker -p 2 -t 4
-or
-    python -m services.worker.worker
+Run with::
+
+    PYTHONPATH=services/api:services/worker:. dramatiq worker.__main__ -p 2 -t 4
 """
+
 from __future__ import annotations
 
-# Import side effects: register actors
-from worker.actors import pipeline  # noqa: F401
 from worker.broker import setup
 
+# The Redis broker must be installed before decorators register actors.
 broker = setup()
+
+# Import side effects: register actors on the configured broker.
+from worker.actors import pipeline as pipeline  # noqa: E402

@@ -25,12 +25,12 @@ class PasswordTests(unittest.TestCase):
         h = hash_password("correct-horse-battery-staple")
         self.assertFalse(verify_password("wrong-password", h))
 
-    def test_bcrypt_cost(self):
-        """Bcrypt rounds must be ≥ 12 (security policy)."""
-        h = hash_password("test-password")
-        # bcrypt hash format: $2b$XX$...
-        cost = int(h.split("$")[2])
-        self.assertGreaterEqual(cost, 12)
+    def test_argon2id_policy(self):
+        """New credentials use a memory-hard Argon2id profile."""
+        hashed = hash_password("test-password")
+        self.assertTrue(hashed.startswith("$argon2id$"))
+        self.assertIn("m=", hashed)
+        self.assertIn("t=", hashed)
 
 
 class JWTTests(unittest.TestCase):

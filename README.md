@@ -23,12 +23,14 @@ React Admin (apps/admin)  ──►  FastAPI (services/api)  ──►  PostgreS
 - **Backend:** FastAPI (Python 3.12) + SQLAlchemy 2.0 async + Alembic.
 - **Worker:** dramatiq + Redis Streams.
 - **ML:** MediaPipe Face Mesh (478 точек), faster-whisper (ASR), DTW + Mahalanobis (статистический baseline).
-- **Frontend:** React 19 + Vite 6 + TypeScript + TanStack Query + Zod.
+- **Frontend:** React 19.2 + Vite 8 + TypeScript + TanStack Query + Zod.
 - **Storage:** S3-совместимый (MinIO в dev).
 
 ## Возможности
 
 - Загрузка видео (файл, прямая mp4-ссылка, YouTube через yt-dlp).
+- Обязательный экран выбора 1–20 полезных участков после загрузки; фрагменты запускаются параллельно.
+- Длинный исходник по умолчанию удаляется только после успешной frame-accurate нарезки в analysis-safe H.264 CRF 17.
 - Пайплайн из 6 стадий: validate → extract_landmarks → quality_gate → asr → align → match_baseline.
 - Накопительная база слов/словосочетаний: каждое CONFIRMED_GENUINE ревью инкрементит версию шаблона (DTW + Mahalanobis по региональным фичам).
 - **Canvas-overlay синхронный просмотр** 1-4 видео с overlay landmarks (MediaPipe Face Mesh skeleton + точки) — на странице сравнения анализа и на странице сравнения прогонов слова.
@@ -59,7 +61,7 @@ uv run --directory services/api python -m scripts.seed
 uv run --directory services/api uvicorn app.main:app --reload --port 8080
 
 # 6. Worker (в другом терминале)
-uv run dramatiq services.worker.app.broker -p 2 -t 4
+PYTHONPATH=services/api:services/worker:. uv run dramatiq worker.__main__ -p 2 -t 4
 
 # 7. Frontend
 cd apps/admin && pnpm dev   # http://localhost:5173

@@ -2,6 +2,7 @@
 
 MG-STUB: final.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -23,12 +24,12 @@ class PhraseInstance:
 def _resample(arr: np.ndarray, target_len: int = 30) -> np.ndarray:
     from scipy.interpolate import interp1d
 
-    T = arr.shape[0]
-    if T == target_len:
+    frame_count = arr.shape[0]
+    if frame_count == target_len:
         return arr
-    if T == 0:
+    if frame_count == 0:
         return np.zeros((target_len, arr.shape[1] if arr.ndim > 1 else 1), dtype=arr.dtype)
-    x_old = np.linspace(0, 1, T)
+    x_old = np.linspace(0, 1, frame_count)
     x_new = np.linspace(0, 1, target_len)
     if arr.ndim == 1:
         return np.interp(x_new, x_old, arr).astype(arr.dtype)
@@ -48,40 +49,81 @@ def align_words_to_landmarks(
     max_word_ms: int = 2000,
     fps: float = 30.0,
     language: str = "auto",
+    max_phrase_words: int = 3,
+    max_phrase_ms: int = 5000,
+    max_inter_word_gap_ms: int = 450,
 ) -> list[PhraseInstance]:
+    """Align individual words plus contiguous 2/3-word phrases.
+
+    N-grams are deliberately capped: they give reviewers repeatable
+    word-combinations without quadratic dataset growth.
+    """
     out: list[PhraseInstance] = []
-    if normalized_landmarks.shape[0] == 0 or len(words) == 0:
+    if normalized_landmarks.shape[0] == 0 or not words:
         return out
-    T = normalized_landmarks.shape[0]
-    for w in words:
-        s = int(w["start_ms"])
-        e = int(w["end_ms"])
-        duration = e - s
-        if duration < min_word_ms or duration > max_word_ms:
+    frame_count = normalized_landmarks.shape[0]
+    normalized_words: list[dict] = []
+    for source in words:
+        text = (source.get("text") or "").lower().strip(".,!?;:")
+        if not text:
             continue
-        i0 = max(0, min(T, int(s / 1000 * fps)))
-        i1 = max(i0 + 1, min(T, int(e / 1000 * fps)))
-        lm_slice = normalized_landmarks[i0:i1]
-        if lm_slice.shape[0] < 5:
+        normalized_words.append(
+            {
+                "text": text,
+                "start_ms": int(source["start_ms"]),
+                "end_ms": int(source["end_ms"]),
+                "confidence": float(source.get("confidence", 0.0)),
+            }
+        )
+
+    candidates: list[dict] = []
+    for index, item in enumerate(normalized_words):
+        duration = item["end_ms"] - item["start_ms"]
+        if min_word_ms <= duration <= max_word_ms:
+            candidates.append(item)
+        for phrase_size in range(2, max_phrase_words + 1):
+            group = normalized_words[index : index + phrase_size]
+            if len(group) != phrase_size:
+                break
+            if any(
+                group[position + 1]["start_ms"] - group[position]["end_ms"] > max_inter_word_gap_ms
+                for position in range(len(group) - 1)
+            ):
+                break
+            phrase_duration = group[-1]["end_ms"] - group[0]["start_ms"]
+            if phrase_duration > max_phrase_ms:
+                break
+            candidates.append(
+                {
+                    "text": " ".join(part["text"] for part in group),
+                    "start_ms": group[0]["start_ms"],
+                    "end_ms": group[-1]["end_ms"],
+                    "confidence": min(part["confidence"] for part in group),
+                }
+            )
+
+    for candidate in candidates:
+        start_ms = candidate["start_ms"]
+        end_ms = candidate["end_ms"]
+        first_frame = max(0, min(frame_count, int(start_ms / 1000 * fps)))
+        last_frame = max(first_frame + 1, min(frame_count, int(end_ms / 1000 * fps)))
+        landmark_slice = normalized_landmarks[first_frame:last_frame]
+        if landmark_slice.shape[0] < 5:
             continue
-        lm_resampled = _resample(lm_slice, 30)
-        a0 = int(s * audio_sample_rate / 1000)
-        a1 = int(e * audio_sample_rate / 1000)
-        audio_slice = audio[a0:a1]
+        audio_start = int(start_ms * audio_sample_rate / 1000)
+        audio_end = int(end_ms * audio_sample_rate / 1000)
+        audio_slice = audio[audio_start:audio_end]
         if audio_slice.size == 0:
-            continue
-        word = (w.get("text") or "").lower().strip(".,!?;:")
-        if not word:
             continue
         out.append(
             PhraseInstance(
-                word=word,
+                word=candidate["text"],
                 language=language,
-                start_ms=s,
-                end_ms=e,
-                landmarks_slice=lm_resampled,
+                start_ms=start_ms,
+                end_ms=end_ms,
+                landmarks_slice=_resample(landmark_slice, 30),
                 audio_slice=audio_slice,
-                confidence=float(w.get("confidence", 0.0)),
+                confidence=candidate["confidence"],
             )
         )
     return out

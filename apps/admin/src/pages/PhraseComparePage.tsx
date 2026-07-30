@@ -10,6 +10,7 @@ export function PhraseComparePage() {
   const { word = '' } = useParams<{ word: string }>();
   const [params] = useSearchParams();
   const language = params.get('lang') ?? 'en';
+  const subjectId = params.get('subject') ?? undefined;
   const push = useToasts((s) => s.push);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [tracks, setTracks] = useState<SyncTrack[]>([]);
@@ -17,8 +18,8 @@ export function PhraseComparePage() {
 
   const decoded = decodeURIComponent(word);
   const { data: samples = [] } = useQuery({
-    queryKey: ['samples-compare', decoded, language],
-    queryFn: () => api.listSamplesForWord(decoded, language),
+    queryKey: ['samples-compare', decoded, language, subjectId],
+    queryFn: () => api.listSamplesForWord(decoded, language, undefined, undefined, subjectId),
   });
 
   useEffect(() => {
@@ -34,24 +35,26 @@ export function PhraseComparePage() {
     (async () => {
       const chosen = samples.filter((s) => selected.has(s.id));
       const newTracks: SyncTrack[] = [];
-      let earliest = Number.POSITIVE_INFINITY;
-      let latest = 0;
       for (const s of chosen) {
         try {
           const u = await api.getSampleUrls(decoded, s.id);
           let landmarks: { points: Float32Array; confidence: number }[] | null = null;
-          if (!u.videoClipUrl && u.landmarksUrl) {
+          let landmarkFps = 30;
+          if (u.landmarksUrl) {
             const loaded = await fetchLandmarks(u.landmarksUrl);
-            landmarks = loaded.points.map((p, i) => ({ points: p, confidence: loaded.confidences[i] }));
+            landmarkFps = loaded.fps;
+            landmarks = loaded.points.map((points, index) => ({
+              points,
+              confidence: loaded.confidences[index],
+            }));
           }
-          earliest = Math.min(earliest, s.startMs);
-          latest = Math.max(latest, s.endMs);
           newTracks.push({
             id: s.id,
-            videoUrl: u.videoClipUrl || u.landmarksUrl,
+            videoUrl: u.videoClipUrl,
             landmarks,
-            startMs: 0,
-            endMs: Math.max(500, s.endMs - s.startMs),
+            landmarkFps,
+            startMs: u.videoInPointMs,
+            endMs: u.videoOutPointMs,
             label: `${decoded} #${s.id.slice(0, 6)}`,
           });
         } catch (e) {
@@ -59,11 +62,8 @@ export function PhraseComparePage() {
         }
       }
       if (!cancelled) {
-        // Normalize start times to 0 for sync
-        newTracks.forEach((t) => {
-          t.startMs = 0;
-        });
         setTracks(newTracks);
+        // The SyncPlayer maps every source in-point to shared t=0.
         setMarkers([{ timeMs: 0, label: decoded }]);
       }
     })();
@@ -86,7 +86,7 @@ export function PhraseComparePage() {
         <div>
           <p className="eyebrow">
             <Link to="/words">Слова</Link> /{' '}
-            <Link to={`/words/${word}?lang=${language}`}>{decoded}</Link> / Сравнение
+            <Link to={`/words/${word}?lang=${language}${subjectId ? `&subject=${subjectId}` : ''}`}>{decoded}</Link> / Сравнение
           </p>
           <h1>Сравнение прогонов: {decoded}</h1>
           <p>Выберите до 4 verified-прогонов для синхронного просмотра.</p>
@@ -122,7 +122,12 @@ export function PhraseComparePage() {
                     style={{ cursor: 'pointer', background: selected.has(s.id) ? 'var(--info-bg)' : undefined }}
                   >
                     <td>
-                      <input type="checkbox" checked={selected.has(s.id)} onChange={() => toggle(s.id)} />
+                      <input
+                        type="checkbox"
+                        checked={selected.has(s.id)}
+                        onClick={(event) => event.stopPropagation()}
+                        onChange={() => toggle(s.id)}
+                      />
                     </td>
                     <td className="mono text-xs">{s.id.slice(0, 8)}</td>
                     <td className="text-sm muted">

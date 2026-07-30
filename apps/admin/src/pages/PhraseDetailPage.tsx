@@ -7,10 +7,11 @@ export function PhraseDetailPage() {
   const { word = '' } = useParams<{ word: string }>();
   const [params] = useSearchParams();
   const language = params.get('lang') ?? 'en';
+  const subjectId = params.get('subject') ?? undefined;
 
   const { data: templates = [] } = useQuery({
-    queryKey: ['templates', word, language],
-    queryFn: () => api.listTemplates(decodeURIComponent(word), language),
+    queryKey: ['templates', word, language, subjectId],
+    queryFn: () => api.listTemplates(decodeURIComponent(word), language, subjectId),
   });
 
   const latest = templates[0];
@@ -42,7 +43,10 @@ export function PhraseDetailPage() {
         </div>
         <div className="row gap-2">
           {latest && (
-            <Link to={`/words/${word}/compare?lang=${language}`} className="btn">
+            <Link
+              to={`/words/${word}/compare?lang=${language}${subjectId ? `&subject=${subjectId}` : ''}`}
+              className="btn"
+            >
               Сравнить версии
             </Link>
           )}

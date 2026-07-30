@@ -1,18 +1,27 @@
-"""Password hashing using passlib + bcrypt.
+"""Password hashing with Argon2id and legacy bcrypt verification.
 
-MG-STUB: final.
+New credentials use OWASP's memory-hard Argon2id profile. ``BcryptHasher`` is
+kept second only so installations can verify hashes created by MimicGuard
+0.1; successful login can later persist ``verify_and_update()``'s replacement.
 """
-from passlib.context import CryptContext
 
-_pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto", bcrypt__rounds=12)
+from __future__ import annotations
+
+from pwdlib import PasswordHash
+from pwdlib.hashers.argon2 import Argon2Hasher
+from pwdlib.hashers.bcrypt import BcryptHasher
+
+_password_hash = PasswordHash((Argon2Hasher(), BcryptHasher()))
 
 
 def hash_password(plain: str) -> str:
-    return _pwd_context.hash(plain)
+    if not plain:
+        raise ValueError("Password must not be empty")
+    return _password_hash.hash(plain)
 
 
 def verify_password(plain: str, hashed: str) -> bool:
     try:
-        return _pwd_context.verify(plain, hashed)
-    except Exception:
+        return _password_hash.verify(plain, hashed)
+    except (TypeError, ValueError):
         return False

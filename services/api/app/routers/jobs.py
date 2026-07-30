@@ -1,4 +1,5 @@
 """Jobs router."""
+
 from __future__ import annotations
 
 import uuid
@@ -8,7 +9,9 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
-from ..schemas import CreateJobRequest, JobOut, JobStageOut
+from ..db.models import User
+from ..dependencies import S3Dep
+from ..schemas import CreateJobRequest, DecisionOut, JobArtifactsResponse, JobOut, JobStageOut
 from ..security.rbac import Permission, require_permission
 from ..services.jobs import JobService
 
@@ -31,18 +34,18 @@ def _to_job_out(detail: dict) -> JobOut:
         started_at=j.started_at,
         finished_at=j.finished_at,
         decision=(
-            {
-                "id": decision.id,
-                "job_id": decision.job_id,
-                "label": decision.label,
-                "risk_score": decision.risk_score,
-                "quality_score": decision.quality_score,
-                "model_version": decision.model_version,
-                "model_checksum": decision.model_checksum,
-                "evidence": decision.evidence or [],
-                "phrase_instances": decision.phrase_instances or [],
-                "created_at": decision.created_at,
-            }
+            DecisionOut(
+                id=decision.id,
+                job_id=decision.job_id,
+                label=decision.label,
+                risk_score=decision.risk_score,
+                quality_score=decision.quality_score,
+                model_version=decision.model_version,
+                model_checksum=decision.model_checksum,
+                evidence=decision.evidence or [],
+                phrase_instances=decision.phrase_instances or [],
+                created_at=decision.created_at,
+            )
             if decision
             else None
         ),
@@ -64,7 +67,7 @@ def _to_job_out(detail: dict) -> JobOut:
 @router.post("", response_model=JobOut, status_code=202)
 async def create_job(
     body: CreateJobRequest,
-    user: Annotated[object, Depends(require_permission(Permission.JOB_WRITE))],
+    user: Annotated[User, Depends(require_permission(Permission.JOB_WRITE))],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     svc = JobService(db, user.tenant_id, user)
@@ -80,7 +83,7 @@ async def create_job(
 
 @router.get("", response_model=list[JobOut])
 async def list_jobs(
-    user: Annotated[object, Depends(require_permission(Permission.JOB_READ))],
+    user: Annotated[User, Depends(require_permission(Permission.JOB_READ))],
     db: Annotated[AsyncSession, Depends(get_db)],
     state: str | None = Query(default=None),
     subject_id: uuid.UUID | None = Query(default=None),
@@ -89,15 +92,13 @@ async def list_jobs(
 ):
     svc = JobService(db, user.tenant_id, user)
     items, _ = await svc.list(state, subject_id, cursor, limit)
-    return [
-        _to_job_out(await svc.get_full(j.id)) for j in items
-    ]
+    return [_to_job_out(await svc.get_full(j.id)) for j in items]
 
 
 @router.get("/{job_id}", response_model=JobOut)
 async def get_job(
     job_id: uuid.UUID,
-    user: Annotated[object, Depends(require_permission(Permission.JOB_READ))],
+    user: Annotated[User, Depends(require_permission(Permission.JOB_READ))],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     svc = JobService(db, user.tenant_id, user)
@@ -105,10 +106,21 @@ async def get_job(
     return _to_job_out(detail)
 
 
+@router.get("/{job_id}/artifacts", response_model=JobArtifactsResponse)
+async def get_job_artifacts(
+    job_id: uuid.UUID,
+    user: Annotated[User, Depends(require_permission(Permission.VIDEO_READ))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    s3: S3Dep,
+):
+    service = JobService(db, user.tenant_id, user)
+    return JobArtifactsResponse(**(await service.get_artifacts(job_id, s3)))
+
+
 @router.post("/{job_id}:cancel", response_model=JobOut)
 async def cancel_job(
     job_id: uuid.UUID,
-    user: Annotated[object, Depends(require_permission(Permission.JOB_WRITE))],
+    user: Annotated[User, Depends(require_permission(Permission.JOB_WRITE))],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     svc = JobService(db, user.tenant_id, user)
@@ -119,7 +131,7 @@ async def cancel_job(
 @router.post("/{job_id}:retry", response_model=JobOut)
 async def retry_job(
     job_id: uuid.UUID,
-    user: Annotated[object, Depends(require_permission(Permission.JOB_RETRY))],
+    user: Annotated[User, Depends(require_permission(Permission.JOB_RETRY))],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     svc = JobService(db, user.tenant_id, user)

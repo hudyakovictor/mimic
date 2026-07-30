@@ -2,9 +2,12 @@
 
 MG-STUB: final.
 """
+
 from __future__ import annotations
 
 import asyncio
+import gzip
+import hashlib
 import io
 import json
 import os
@@ -15,8 +18,6 @@ from datetime import UTC, datetime
 
 import dramatiq
 import numpy as np
-from sqlalchemy import select, update
-
 from app.db.models import (
     AnalysisJob,
     Decision,
@@ -26,10 +27,15 @@ from app.db.models import (
 )
 from app.settings import get_settings
 from app.storage import BUCKET_DERIVED, BUCKET_VIDEOS
-from app.storage.keys import audio_key, landmarks_key, transcript_key
-from packages.landmark_engine.domain import HeadPose, LandmarkFrame, Point3D, LandmarkSequence as LMSequence
-from packages.landmark_engine.quality import assess_quality
+from app.storage.keys import audio_key, landmarks_key, normalized_landmarks_key, transcript_key
+from sqlalchemy import select, update
 
+from packages.landmark_engine.domain import HeadPose, LandmarkFrame, Point3D
+from packages.landmark_engine.domain import LandmarkSequence as LMSequence
+from packages.landmark_engine.quality import assess_quality
+from worker.actors.db import complete_stage, get_s3, load_asset, load_job, session_scope, start_stage
+from worker.asr.transcribe import WhisperEngine
+from worker.baseline.match import match as baseline_match
 from worker.landmarks.extract import (
     extract_landmarks_from_frames,
     normalize_landmarks,
@@ -42,9 +48,11 @@ from worker.video.probe import (
     ffprobe,
     read_wav_float32,
 )
-from worker.asr.transcribe import WhisperEngine
-from worker.baseline.match import match as baseline_match
-from worker.actors.db import complete_stage, get_s3, load_asset, load_job, session_scope, start_stage
+
+SCORER_VERSION = "statistical-v2"
+SCORER_CHECKSUM = hashlib.sha256(
+    b"motion-features-v2|dtw-window-5|regional-mahalanobis-v2|fusion-0.7-0.3"
+).hexdigest()
 
 
 @dramatiq.actor(queue_name="analysis.pipeline", max_retries=3, time_limit=900_000)
@@ -69,9 +77,7 @@ class _StageCtx:
         output_metadata: dict | None = None,
     ) -> None:
         async with session_scope() as session:
-            await complete_stage(
-                session, self.job_id, self.name, self.attempt, output_uri, output_metadata
-            )
+            await complete_stage(session, self.job_id, self.name, self.attempt, output_uri, output_metadata)
 
     async def fail(self, error: str) -> None:
         from .db import fail_stage
@@ -233,36 +239,46 @@ async def _run_pipeline(job_id: uuid.UUID, correlation_id: str | None) -> dict:
             asset = await load_asset(session, job.asset_id)
             tenant_id = job.tenant_id
             object_key = asset.object_key
-            if job.state == "QUEUED":
-                await session.execute(
-                    update(AnalysisJob)
-                    .where(AnalysisJob.id == job_id)
-                    .values(state="RUNNING", started_at=datetime.now(UTC))
+            if job.state != "QUEUED":
+                return {"state": job.state, "deduplicated": True}
+            transition = await session.execute(
+                update(AnalysisJob)
+                .where(
+                    AnalysisJob.id == job_id,
+                    AnalysisJob.state == "QUEUED",
                 )
+                .values(state="RUNNING", started_at=datetime.now(UTC))
+            )
+            if getattr(transition, "rowcount", 0) != 1:
+                return {"state": "RUNNING", "deduplicated": True}
 
         # 1. Validate asset
         stage = await _run_stage(job_id, "VALIDATE_ASSET")
-        body = await s3.get_object(BUCKET_VIDEOS, object_key)
-        with open(video_path, "wb") as f:
-            f.write(body)
+        await s3.download_file(BUCKET_VIDEOS, object_key, video_path)
         info = await ffprobe(video_path)
         await stage.complete(output_metadata={"duration_ms": info.duration_ms, "fps": info.fps})
 
         # 2. Extract audio
         stage = await _run_stage(job_id, "EXTRACT_AUDIO")
         await extract_audio_pcm(video_path, audio_path)
-        with open(audio_path, "rb") as f:
-            await s3.put_object(BUCKET_DERIVED, audio_key(tenant_id, job_id), f.read(), "audio/wav")
+        await s3.upload_file(
+            BUCKET_DERIVED,
+            audio_key(tenant_id, job_id),
+            audio_path,
+            "audio/wav",
+        )
         await stage.complete()
 
         # 3. Extract landmarks
         stage = await _run_stage(job_id, "EXTRACT_LANDMARKS")
         frames = decode_video_bgr24(video_path)
-        if not frames:
+        face_frames = extract_landmarks_from_frames(
+            frames, info.fps, settings.mediapipe_min_confidence
+        )
+        if not face_frames:
             await stage.fail("NO_FRAMES")
             await _mark_insufficient_data(job_id, "NO_FRAMES")
             return {"state": "INSUFFICIENT_DATA"}
-        face_frames = extract_landmarks_from_frames(frames, info.fps, settings.mediapipe_min_confidence)
         if not any(ff.confidence > 0.5 for ff in face_frames):
             await stage.fail("NO_FACE_DETECTED")
             await _mark_insufficient_data(job_id, "NO_FACE_DETECTED")
@@ -276,17 +292,21 @@ async def _run_pipeline(job_id: uuid.UUID, correlation_id: str | None) -> dict:
             await _mark_insufficient_data(job_id, f"QUALITY_FAIL:{failures}")
             return {"state": "INSUFFICIENT_DATA", "quality": qa.score}
 
-        write_landmarks_npz(face_frames, landmarks_path)
+        write_landmarks_npz(face_frames, landmarks_path, info.fps)
         with open(landmarks_path, "rb") as f:
-            await s3.put_object(
-                BUCKET_DERIVED, landmarks_key(tenant_id, job_id), f.read(), "application/octet-stream"
-            )
+            compressed_landmarks = gzip.compress(f.read(), compresslevel=6)
+        await s3.put_object(
+            BUCKET_DERIVED,
+            landmarks_key(tenant_id, job_id),
+            compressed_landmarks,
+            "application/gzip",
+        )
         norm = normalize_landmarks(face_frames)
         np.save(normalized_path, norm)
         with open(normalized_path, "rb") as f:
             await s3.put_object(
                 BUCKET_DERIVED,
-                f"{tenant_id}/derived/{job_id}/normalized.npy",
+                normalized_landmarks_key(tenant_id, job_id),
                 f.read(),
                 "application/octet-stream",
             )
@@ -368,18 +388,23 @@ async def _run_pipeline(job_id: uuid.UUID, correlation_id: str | None) -> dict:
                         PhraseTemplate.tenant_id == tenant_id,
                         PhraseTemplate.word == inst.word,
                         PhraseTemplate.language == inst.language,
+                        PhraseTemplate.subject_id == job.subject_id,
                         PhraseTemplate.state == "ACTIVE",
                     )
                     .order_by(PhraseTemplate.version.desc())
                     .limit(1)
                 )
                 tpl = (await session.execute(tpl_q)).scalar_one_or_none()
-                if tpl is None:
+                if tpl is None or tpl.n_samples < settings.phrase_baseline_min_samples:
+                    sample_count = tpl.n_samples if tpl is not None else 0
                     evidence_acc.append(
                         {
                             "code": "INSUFFICIENT_BASELINE",
                             "contribution": 0.0,
-                            "message": f"No baseline for word '{inst.word}'",
+                            "message": (
+                                f"Baseline for '{inst.word}' has {sample_count}/"
+                                f"{settings.phrase_baseline_min_samples} verified samples"
+                            ),
                             "word": inst.word,
                             "start_ms": inst.start_ms,
                             "end_ms": inst.end_ms,
@@ -443,8 +468,8 @@ async def _run_pipeline(job_id: uuid.UUID, correlation_id: str | None) -> dict:
                     label=label,
                     risk_score=risk_score,
                     quality_score=qa.score,
-                    model_version="statistical-v1",
-                    model_checksum="",
+                    model_version=SCORER_VERSION,
+                    model_checksum=SCORER_CHECKSUM,
                     evidence=top_evidence,
                     phrase_instances=phrase_decision_rows,
                 )

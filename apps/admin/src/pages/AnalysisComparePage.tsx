@@ -27,44 +27,60 @@ export function AnalysisComparePage() {
         const newTracks: SyncTrack[] = [];
         const newMarkers: Marker[] = [];
 
-        // Probe video URL for the asset
-        const urlRes = await fetch(`/api/v1/assets/${job.assetId}/downloadUrl`, {
-          headers: { Authorization: `Bearer ${localStorage.getItem('access_token')}` },
-        });
-        if (!urlRes.ok) throw new Error('Cannot get download URL');
-        const { url } = await urlRes.json();
+        const first = job.decision.phraseInstances[0];
+        const artifacts = await api.getJobArtifacts(job.id);
+        let probeLandmarks: { points: Float32Array; confidence: number }[] | null = null;
+        let probeLandmarkFps = artifacts.fps;
+        if (artifacts.landmarksUrl) {
+          const loaded = await fetchLandmarks(artifacts.landmarksUrl);
+          probeLandmarkFps = loaded.fps;
+          probeLandmarks = loaded.points.map((points, index) => ({
+            points,
+            confidence: loaded.confidences[index],
+          }));
+        }
         newTracks.push({
           id: 'probe',
-          videoUrl: url,
-          startMs: 0,
-          endMs: job.finishedAt && job.startedAt
-            ? (new Date(job.finishedAt).getTime() - new Date(job.startedAt).getTime())
-            : 60_000,
-          label: 'Probe',
+          videoUrl: artifacts.videoUrl,
+          landmarks: probeLandmarks,
+          landmarkFps: probeLandmarkFps,
+          startMs: first?.startMs ?? 0,
+          endMs: first?.endMs ?? artifacts.durationMs,
+          label: first ? `Проверяемое · «${first.word}»` : 'Проверяемое видео',
           color: '#ffffff',
         });
 
-        // Add baseline samples for the first phrase
-        const first = job.decision.phraseInstances[0];
+        // Add verified baseline samples for the first recognized phrase
         if (first) {
-          const samples = await api.listSamplesForWord(first.word, first.language);
+          const samples = await api.listSamplesForWord(
+            first.word,
+            first.language,
+            undefined,
+            undefined,
+            job.subjectId,
+          );
           const head = samples.slice(0, 3);
           for (const s of head) {
             try {
               const u = await api.getSampleUrls(first.word, s.id);
-              // Try to fetch landmarks if no video clip
               let landmarks: { points: Float32Array; confidence: number }[] | null = null;
-              if (!u.videoClipUrl && u.landmarksUrl) {
+              let landmarkFps = 30;
+              if (u.landmarksUrl) {
                 const loaded = await fetchLandmarks(u.landmarksUrl);
-                landmarks = loaded.points.map((p, i) => ({ points: p, confidence: loaded.confidences[i] }));
+                landmarkFps = loaded.fps;
+                landmarks = loaded.points.map((points, index) => ({
+                  points,
+                  confidence: loaded.confidences[index],
+                }));
               }
               newTracks.push({
                 id: s.id,
-                videoUrl: u.videoClipUrl || u.landmarksUrl,
+                videoUrl: u.videoClipUrl,
                 landmarks,
-                startMs: s.startMs,
-                endMs: s.endMs,
-                label: `${first.word} (n=${s.nFrames})`,
+                landmarkFps,
+                startMs: u.videoInPointMs,
+                endMs: u.videoOutPointMs,
+                label: `Эталон · «${first.word}» #${s.id.slice(0, 5)}`,
               });
             } catch (e) {
               // skip
@@ -72,10 +88,7 @@ export function AnalysisComparePage() {
           }
         }
 
-        // Markers
-        for (const pi of job.decision.phraseInstances) {
-          newMarkers.push({ timeMs: pi.startMs, label: pi.word });
-        }
+        if (first) newMarkers.push({ timeMs: 0, label: first.word });
 
         if (!cancelled) {
           setTracks(newTracks);

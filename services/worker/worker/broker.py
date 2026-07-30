@@ -5,17 +5,12 @@ MG-STUB: final.
 from __future__ import annotations
 
 import dramatiq
+from app.settings import get_settings
 from dramatiq.brokers.redis import RedisBroker
-from dramatiq.middleware import (
-    AgeLimit,
-    Prometheus,
-    Retries,
-    TimeLimit,
-)
+from dramatiq.middleware import AgeLimit, Retries, TimeLimit
+from dramatiq.middleware.prometheus import Prometheus
 from dramatiq.results import Results
 from dramatiq.results.backends.redis import RedisBackend
-
-from app.settings import get_settings
 
 _broker: RedisBroker | None = None
 _results: RedisBackend | None = None
@@ -25,7 +20,9 @@ def get_broker() -> RedisBroker:
     global _broker
     if _broker is None:
         settings = get_settings()
-        _broker = RedisBroker(url=settings.redis_broker_url)
+        # Install middleware exactly once in setup(); RedisBroker otherwise
+        # creates its own AgeLimit/TimeLimit/Retries instances.
+        _broker = RedisBroker(url=settings.redis_broker_url, middleware=[])
         dramatiq.set_broker(_broker)
     return _broker
 

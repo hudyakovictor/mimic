@@ -23,6 +23,7 @@ env/
 node_modules/
 .pnpm-store/
 .vite/
+*.tsbuildinfo
 dist/
 # Lock files are kept (commit package-lock.json / pnpm-lock.yaml)
 

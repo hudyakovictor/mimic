@@ -90,7 +90,7 @@ export interface Subject {
 
 export interface Asset {
   id: string;
-  sourceType: 'UPLOAD' | 'YOUTUBE' | 'URL';
+  sourceType: 'UPLOAD' | 'YOUTUBE' | 'URL' | 'CLIP';
   sourceUrl?: string;
   mime: string;
   sizeBytes: number;
@@ -103,12 +103,14 @@ export interface Asset {
   state: AssetState;
   title?: string;
   failureReason?: string;
+  extra: Record<string, unknown>;
   createdAt: string;
 }
 
 export interface WordSummary {
   word: string;
   language: string;
+  subjectId?: string;
   nTemplates: number;
   nSamples: number;
   hasMatureBaseline: boolean;
