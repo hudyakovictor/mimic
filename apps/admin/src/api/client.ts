@@ -32,7 +32,7 @@ async function request<T>(
   if (!(init?.body instanceof FormData) && !headers['Content-Type'] && init?.body) {
     headers['Content-Type'] = 'application/json';
   }
-  const token = localStorage.getItem('access_token');
+  const token = sessionStorage.getItem('access_token');
   if (token) headers['Authorization'] = `Bearer ${token}`;
   if (init?.idempotencyKey) headers['Idempotency-Key'] = init.idempotencyKey;
   const corrId = crypto.randomUUID();

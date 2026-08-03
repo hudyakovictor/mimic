@@ -38,6 +38,7 @@ class JwtService:
 
     def encode_access(self, user_id: uuid.UUID, tenant_id: uuid.UUID, roles: list[str]) -> tuple[str, int]:
         claims = self._claims(user_id, tenant_id, roles)
+        claims["typ"] = "access"
         ttl = self.settings.access_token_ttl_seconds
         exp = datetime.now(UTC) + timedelta(seconds=ttl)
         claims["exp"] = int(exp.timestamp())

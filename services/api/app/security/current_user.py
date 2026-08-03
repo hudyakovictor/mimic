@@ -2,10 +2,9 @@
 from __future__ import annotations
 
 import uuid
-from typing import Annotated, Optional
+from typing import Annotated
 
-import redis.asyncio as aioredis
-from fastapi import Depends, Header, Request
+from fastapi import Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
@@ -25,19 +24,22 @@ async def get_current_user(
         raise UnauthorizedError("Missing bearer token")
     token = auth_header.removeprefix("Bearer ").strip()
     try:
-        claims = jwt_service.decode(token)
+        claims = jwt_service.decode(token, expect_type="access")
     except UnauthorizedError:
         raise
     # Revocation check (best-effort — graceful when Redis unavailable)
     try:
-        if await jwt_service.is_revoked(claims.get("jti", "")):
-            raise UnauthorizedError("Token revoked")
+        revoked = await jwt_service.is_revoked(claims.get("jti", ""))
     except Exception:
-        # If Redis is down, do not block auth (graceful)
-        pass
+        revoked = False
+    if revoked:
+        raise UnauthorizedError("Token revoked")
 
-    user_id = uuid.UUID(claims["sub"])
-    tenant_id = uuid.UUID(claims["tid"])
+    try:
+        user_id = uuid.UUID(claims["sub"])
+        tenant_id = uuid.UUID(claims["tid"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise UnauthorizedError("Token has invalid subject claims") from exc
 
     user = await db.get(User, user_id)
     if user is None or not user.is_active or user.tenant_id != tenant_id:

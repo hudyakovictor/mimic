@@ -89,10 +89,15 @@ class EventPublisher:
             tenant_id=event.tenant_id,
         )
 
-    async def publish_pending_outbox(self, session: AsyncSession, batch_size: int = 200) -> int:
+    async def publish_pending_outbox(
+        self,
+        session: AsyncSession,
+        batch_size: int = 200,
+        max_attempts: int = 10,
+    ) -> int:
         """Drain unpublished outbox events to workers/Redis with event-id dedupe."""
         repo = OutboxRepository(session)
-        pending = await repo.claim_unpublished(limit=batch_size)
+        pending = await repo.claim_unpublished(limit=batch_size, max_attempts=max_attempts)
         if not pending:
             OUTBOX_PENDING_TOTAL.set(0)
             return 0

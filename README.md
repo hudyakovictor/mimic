@@ -138,6 +138,7 @@ cd apps/admin && pnpm typecheck && pnpm lint
 - `docs/modules/` — спецификации модулей (включая заглушки с подробными docstring).
 - `docs/14-runbooks/` — incident runbooks.
 - `docs/quality-scorecard.md` — 50-факторный scorecard.
+- `docs/16-accuracy-validation-plan.md` — как корректно валидировать цель 95%, собирать датасет и калибровать FAR/FRR.
 - `docs/adr/` — architectural decision records.
 
 ## Лицензия

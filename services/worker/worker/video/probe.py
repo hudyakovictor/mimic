@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -44,8 +45,11 @@ async def ffprobe(path: str) -> MediaInfo:
     stdout, stderr = await proc.communicate()
     if proc.returncode != 0:
         raise MediaError(f"ffprobe failed: {stderr.decode()[:500]}")
-    info = json.loads(stdout)
-    duration_s = float(info.get("format", {}).get("duration", 0))
+    try:
+        info = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        raise MediaError("ffprobe returned malformed JSON") from exc
+    duration_s = float(info.get("format", {}).get("duration") or 0)
     duration_ms = int(duration_s * 1000)
     streams = info.get("streams", [])
     video = next((s for s in streams if s.get("codec_type") == "video"), None)
@@ -53,10 +57,15 @@ async def ffprobe(path: str) -> MediaInfo:
     if video is None:
         raise MediaError("No video stream")
     fps = 30.0
-    if "r_frame_rate" in video:
-        num, den = video["r_frame_rate"].split("/")
+    rate = video.get("avg_frame_rate") or video.get("r_frame_rate")
+    if rate and "/" in rate:
+        num, den = rate.split("/", 1)
         if float(den) > 0:
-            fps = float(num) / float(den)
+            parsed_fps = float(num) / float(den)
+            if math.isfinite(parsed_fps) and parsed_fps > 0:
+                fps = parsed_fps
+    if duration_ms <= 0:
+        duration_ms = int(float(video.get("duration") or 0) * 1000)
     return MediaInfo(
         duration_ms=duration_ms,
         width=int(video.get("width", 0)),
@@ -68,7 +77,7 @@ async def ffprobe(path: str) -> MediaInfo:
 
 
 async def extract_audio_pcm(video_path: str, out_path: str) -> None:
-    """Extract mono 16kHz PCM float32 WAV."""
+    """Extract mono 16 kHz signed 16-bit PCM WAV."""
     proc = await asyncio.create_subprocess_exec(
         "ffmpeg",
         "-y",
@@ -79,6 +88,8 @@ async def extract_audio_pcm(video_path: str, out_path: str) -> None:
         "1",
         "-ar",
         "16000",
+        "-c:a",
+        "pcm_s16le",
         "-f",
         "wav",
         out_path,
@@ -96,10 +107,16 @@ def read_wav_float32(path: str) -> tuple[np.ndarray, int]:
     import numpy as np
 
     with wave.open(path, "rb") as w:
+        channels = w.getnchannels()
+        sample_width = w.getsampwidth()
         sr = w.getframerate()
         n = w.getnframes()
         raw = w.readframes(n)
-    audio = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+    if sample_width != 2:
+        raise MediaError(f"Unsupported WAV sample width: {sample_width} bytes")
+    audio = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
+    if channels > 1:
+        audio = audio.reshape(-1, channels).mean(axis=1, dtype=np.float32)
     return audio, sr
 
 
@@ -121,6 +138,8 @@ def decode_video_bgr24(video_path: str) -> Iterator[np.ndarray]:
 
 
 async def cut_clip(video_path: str, start_ms: int, end_ms: int, out_path: str) -> None:
+    if start_ms < 0 or end_ms <= start_ms:
+        raise ValueError("clip range must satisfy 0 <= start_ms < end_ms")
     start_s = max(0, start_ms / 1000)
     dur_s = max(0.1, (end_ms - start_ms) / 1000)
     proc = await asyncio.create_subprocess_exec(
@@ -135,7 +154,15 @@ async def cut_clip(video_path: str, start_ms: int, end_ms: int, out_path: str) -
         "-c:v",
         "libx264",
         "-preset",
-        "ultrafast",
+        "medium",
+        "-crf",
+        "17",
+        "-pix_fmt",
+        "yuv420p",
+        "-fps_mode",
+        "cfr",
+        "-movflags",
+        "+faststart",
         "-c:a",
         "aac",
         out_path,

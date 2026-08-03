@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
-from scipy.stats import chi2
+from statistics import NormalDist
 
 
 @dataclass
@@ -18,9 +18,14 @@ class MatchResult:
 
 
 def dtw_distance(a: np.ndarray, b: np.ndarray, window: int = 5) -> tuple[float, list[tuple[int, int]]]:
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
+    if a.ndim != 2 or b.ndim != 2 or a.shape[1] != b.shape[1]:
+        raise ValueError("DTW inputs must be 2D arrays with the same feature width")
     n, m = len(a), len(b)
     if n == 0 or m == 0:
         return float("inf"), []
+    window = max(abs(n - m), int(window))
     cost = np.full((n + 1, m + 1), np.inf)
     cost[0, 0] = 0.0
     for i in range(1, n + 1):
@@ -55,19 +60,29 @@ def dtw_slope(path: list[tuple[int, int]]) -> float:
 
 
 def mahalanobis(x: np.ndarray, mean: np.ndarray, cov_diag: np.ndarray) -> float:
+    if x.shape != mean.shape or x.shape != cov_diag.shape:
+        raise ValueError("Mahalanobis vectors must have identical shapes")
     d = x - mean
     return float(np.sqrt(np.sum(d * d / np.maximum(cov_diag, 1e-8))))
 
 
 def chi2_threshold(dims: int, alpha: float = 0.05) -> float:
     """Threshold for the (non-squared) Mahalanobis distance."""
-    return float(np.sqrt(chi2.ppf(1 - alpha, df=dims)))
+    if dims <= 0 or not 0 < alpha < 1:
+        raise ValueError("dims must be positive and alpha must be in (0, 1)")
+    # Wilson-Hilferty approximation avoids loading scipy in latency-sensitive workers.
+    z = NormalDist().inv_cdf(1 - alpha)
+    quantile = dims * (1 - 2 / (9 * dims) + z * np.sqrt(2 / (9 * dims))) ** 3
+    return float(np.sqrt(max(quantile, 0.0)))
 
 
 def features_from_landmarks(arr: np.ndarray) -> np.ndarray:
     """Compute 8 regional features from a 30x33 normalized landmarks array."""
+    arr = np.asarray(arr, dtype=np.float32)
     if arr.ndim != 2 or arr.shape[0] == 0:
         return np.zeros(8, dtype=np.float32)
+    if arr.shape[1] < 33:
+        raise ValueError("Expected at least 33 normalized landmark features")
     v = arr
     mouth_open = np.abs(v[:, 15] - v[:, 9])
     mouth_width = np.abs(v[:, 6] - v[:, 0])
@@ -94,6 +109,10 @@ def features_from_landmarks(arr: np.ndarray) -> np.ndarray:
 
 def match(probe_lm: np.ndarray, template_mean: np.ndarray, template_regional: dict) -> MatchResult:
     """Match a probe phrase (30x33) against a template (mean_curve + regional_stats)."""
+    probe_lm = np.asarray(probe_lm, dtype=np.float32)
+    template_mean = np.asarray(template_mean, dtype=np.float32)
+    if not np.isfinite(probe_lm).all() or not np.isfinite(template_mean).all():
+        raise ValueError("Landmark arrays contain NaN or infinity")
     d, path = dtw_distance(probe_lm, template_mean, window=5)
     slope = dtw_slope(path)
     # Regional Mahalanobis
@@ -116,6 +135,7 @@ def match(probe_lm: np.ndarray, template_mean: np.ndarray, template_regional: di
         ],
         dtype=np.float32,
     )
+    tmpl_sigma = np.maximum(np.abs(tmpl_sigma), 1e-3)
     selected_features = probe_feats[[0, 2, 3, 4]]
     maha = mahalanobis(selected_features, tmpl_vec, tmpl_sigma**2)
     thr = chi2_threshold(4, 0.05)

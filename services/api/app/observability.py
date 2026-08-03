@@ -6,7 +6,10 @@ No PII or biometric data is ever logged; only IDs, durations, statuses.
 from __future__ import annotations
 
 import logging
+import os
 import sys
+import threading
+from typing import TextIO
 
 import structlog
 from prometheus_client import (
@@ -21,8 +24,35 @@ from prometheus_client import (
 # ----------------------------- Logging ----------------------------------
 
 
-def configure_logging(level: str = "INFO") -> None:
-    """Configure structlog for JSON output to stdout."""
+class _TeeStream:
+    """Write complete JSON lines to stdout and one append-only diagnostic file."""
+
+    def __init__(self, console: TextIO, file_path: str | None) -> None:
+        self.console = console
+        self.file: TextIO | None = None
+        self._lock = threading.Lock()
+        if file_path:
+            directory = os.path.dirname(os.path.abspath(file_path))
+            os.makedirs(directory, exist_ok=True)
+            self.file = open(file_path, "a", encoding="utf-8", buffering=1)
+
+    def write(self, value: str) -> int:
+        with self._lock:
+            self.console.write(value)
+            self.console.flush()
+            if self.file:
+                self.file.write(value)
+                self.file.flush()
+        return len(value)
+
+    def flush(self) -> None:
+        self.console.flush()
+        if self.file:
+            self.file.flush()
+
+
+def configure_logging(level: str = "INFO", log_file: str | None = None) -> None:
+    """Configure JSON logs to stdout and a shared append-only JSONL file."""
     log_level = getattr(logging, level.upper(), logging.INFO)
     structlog.configure(
         processors=[
@@ -34,11 +64,11 @@ def configure_logging(level: str = "INFO") -> None:
             structlog.processors.JSONRenderer(),
         ],
         wrapper_class=structlog.make_filtering_bound_logger(log_level),
-        logger_factory=structlog.PrintLoggerFactory(file=sys.stdout),
+        logger_factory=structlog.PrintLoggerFactory(file=_TeeStream(sys.stdout, log_file)),
         cache_logger_on_first_use=True,
     )
     # Bridge stdlib logging (uvicorn, sqlalchemy, etc.)
-    logging.basicConfig(level=log_level, format="%(message)s")
+    logging.basicConfig(level=log_level, format="%(message)s", force=True)
 
 
 def get_logger(name: str | None = None) -> structlog.stdlib.BoundLogger:

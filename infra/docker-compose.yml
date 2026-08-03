@@ -83,8 +83,16 @@ services:
       S3_ACCESS_KEY: mimicguard
       S3_SECRET_KEY: change-me-now
       JWT_SECRET: dev-secret-change-me-in-production
+      LOG_FILE: /var/log/mimicguard/mimicguard.jsonl
+    volumes:
+      - mimicguard-logs:/var/log/mimicguard
     ports:
       - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
     command: >
       sh -c "cd /app/services/api && alembic upgrade head &&
              cd /app && python -m scripts.seed &&
@@ -102,7 +110,7 @@ services:
       minio:
         condition: service_healthy
       api:
-        condition: service_started
+        condition: service_healthy
     environment:
       DATABASE_URL: postgresql+asyncpg://mimicguard:mimicguard@postgres:5432/mimicguard
       REDIS_URL: redis://redis:6379/0
@@ -110,6 +118,9 @@ services:
       S3_ENDPOINT: http://minio:9000
       S3_ACCESS_KEY: mimicguard
       S3_SECRET_KEY: change-me-now
+      LOG_FILE: /var/log/mimicguard/mimicguard.jsonl
+    volumes:
+      - mimicguard-logs:/var/log/mimicguard
     command: dramatiq worker.__main__ -p 2 -t 4
 
   prometheus:
@@ -131,3 +142,4 @@ services:
 volumes:
   pgdata:
   miniodata:
+  mimicguard-logs:

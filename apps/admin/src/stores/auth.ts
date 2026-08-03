@@ -1,7 +1,7 @@
 // Auth + UI state with zustand.
 
 import { create } from 'zustand';
-import { persist } from 'zustand/middleware';
+import { createJSONStorage, persist } from 'zustand/middleware';
 import type { CurrentUser } from '../types';
 
 interface AuthState {
@@ -21,14 +21,14 @@ export const useAuth = create<AuthState>()(
       refreshToken: null,
       user: null,
       setSession: (access, refresh, user) => {
-        localStorage.setItem('access_token', access);
-        localStorage.setItem('refresh_token', refresh);
+        sessionStorage.setItem('access_token', access);
+        sessionStorage.setItem('refresh_token', refresh);
         set({ accessToken: access, refreshToken: refresh, user });
       },
       setUser: (user) => set({ user }),
       logout: () => {
-        localStorage.removeItem('access_token');
-        localStorage.removeItem('refresh_token');
+        sessionStorage.removeItem('access_token');
+        sessionStorage.removeItem('refresh_token');
         set({ accessToken: null, refreshToken: null, user: null });
       },
       hasRole: (...roles) => {
@@ -39,6 +39,7 @@ export const useAuth = create<AuthState>()(
     }),
     {
       name: 'mimicguard-auth',
+      storage: createJSONStorage(() => sessionStorage),
       partialize: (s) => ({ accessToken: s.accessToken, refreshToken: s.refreshToken, user: s.user }),
     },
   ),

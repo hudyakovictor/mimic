@@ -82,7 +82,7 @@ export function AnalysisComparePage() {
                 endMs: u.videoOutPointMs,
                 label: `Эталон · «${first.word}» #${s.id.slice(0, 5)}`,
               });
-            } catch (e) {
+            } catch {
               // skip
             }
           }

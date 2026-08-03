@@ -40,11 +40,14 @@ class OutboxRepository:
         await self.session.flush()
         return ev
 
-    async def claim_unpublished(self, limit: int = 200) -> list[OutboxEvent]:
+    async def claim_unpublished(self, limit: int = 200, max_attempts: int = 10) -> list[OutboxEvent]:
         """Select FOR UPDATE SKIP LOCKED. Caller must be inside a transaction."""
         stmt = (
             select(OutboxEvent)
-            .where(OutboxEvent.published_at.is_(None))
+            .where(
+                OutboxEvent.published_at.is_(None),
+                OutboxEvent.attempts < max_attempts,
+            )
             .order_by(OutboxEvent.created_at.asc())
             .limit(limit)
             .with_for_update(skip_locked=True)

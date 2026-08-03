@@ -8,6 +8,7 @@ import base64
 import json
 import uuid
 from collections.abc import Sequence
+from datetime import datetime
 from typing import Any, Generic, TypeVar
 
 from sqlalchemy import func, select
@@ -57,6 +58,8 @@ class BaseRepository(Generic[T]):
 
     async def list_all(self, limit: int = 200) -> Sequence[T]:
         stmt = select(self.model).limit(limit)
+        if hasattr(self.model, "tenant_id"):
+            stmt = stmt.where(getattr(self.model, "tenant_id") == self.tenant_id)
         result = await self.session.execute(stmt)
         return result.scalars().all()
 
@@ -71,7 +74,7 @@ class BaseRepository(Generic[T]):
 
         Order: created_at desc, id desc.
         """
-        from sqlalchemy import and_, desc
+        from sqlalchemy import and_, desc, or_
 
         order_col = order_col or getattr(self.model, "created_at", None)
         if order_col is None:
@@ -82,12 +85,12 @@ class BaseRepository(Generic[T]):
         if cursor:
             try:
                 c = decode_cursor(cursor)
-                c_created = c["created_at"]
+                c_created = datetime.fromisoformat(c["created_at"])
                 c_id = c["id"]
                 stmt = stmt.where(
-                    and_(
+                    or_(
                         order_col < c_created,
-                        self.model.id < uuid.UUID(c_id),
+                        and_(order_col == c_created, self.model.id < uuid.UUID(c_id)),
                     )
                 )
             except Exception as e:
@@ -106,5 +109,7 @@ class BaseRepository(Generic[T]):
 
     async def count(self) -> int:
         stmt = select(func.count()).select_from(self.model)
+        if hasattr(self.model, "tenant_id"):
+            stmt = stmt.where(getattr(self.model, "tenant_id") == self.tenant_id)
         result = await self.session.execute(stmt)
         return int(result.scalar() or 0)

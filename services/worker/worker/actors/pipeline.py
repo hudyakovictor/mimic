@@ -26,6 +26,7 @@ from app.db.models import (
     Transcript,
 )
 from app.settings import get_settings
+from app.observability import get_logger
 from app.storage import BUCKET_DERIVED, BUCKET_VIDEOS
 from app.storage.keys import audio_key, landmarks_key, normalized_landmarks_key, transcript_key
 from sqlalchemy import select, update
@@ -53,12 +54,42 @@ SCORER_VERSION = "statistical-v2"
 SCORER_CHECKSUM = hashlib.sha256(
     b"motion-features-v2|dtw-window-5|regional-mahalanobis-v2|fusion-0.7-0.3"
 ).hexdigest()
+log = get_logger(__name__)
 
 
 @dramatiq.actor(queue_name="analysis.pipeline", max_retries=3, time_limit=900_000)
 def run_pipeline(job_id: str, correlation_id: str | None = None) -> dict:
     """Entry point for analysis.requested.v1 events."""
-    return asyncio.run(_run_pipeline(uuid.UUID(job_id), correlation_id))
+    parsed_job_id = uuid.UUID(job_id)
+    from structlog.contextvars import bind_contextvars, clear_contextvars
+
+    clear_contextvars()
+    bind_contextvars(
+        service="worker",
+        job_id=str(parsed_job_id),
+        correlation_id=correlation_id or str(parsed_job_id),
+    )
+    log.info("pipeline.started")
+    try:
+        result = asyncio.run(_run_pipeline(parsed_job_id, correlation_id))
+        log.info("pipeline.finished", state=result.get("state"), elapsed_seconds=result.get("elapsed_seconds"))
+        return result
+    except Exception as exc:
+        # Dramatiq retries the message. Resetting the claim is essential; otherwise
+        # the next attempt sees RUNNING and incorrectly treats the failed attempt as a duplicate.
+        current_message = dramatiq.get_current_message()
+        previous_retries = int(current_message.options.get("retries", 0)) if current_message else 0
+        max_retries = get_settings().worker_retry_default
+        terminal = previous_retries >= max_retries
+        asyncio.run(_mark_job_after_failure(parsed_job_id, str(exc), terminal=terminal))
+        log.exception(
+            "pipeline.failed",
+            error_type=type(exc).__name__,
+            error=str(exc)[:500],
+            retry_number=previous_retries,
+            terminal=terminal,
+        )
+        raise
 
 
 class _StageCtx:
@@ -78,18 +109,22 @@ class _StageCtx:
     ) -> None:
         async with session_scope() as session:
             await complete_stage(session, self.job_id, self.name, self.attempt, output_uri, output_metadata)
+        log.info("pipeline.stage_completed", stage=self.name, attempt=self.attempt, metadata=output_metadata or {})
 
     async def fail(self, error: str) -> None:
         from .db import fail_stage
 
         async with session_scope() as session:
             await fail_stage(session, self.job_id, self.name, self.attempt, error)
+        log.error("pipeline.stage_failed", stage=self.name, attempt=self.attempt, error=error[:500])
 
 
-async def _run_stage(job_id: uuid.UUID, name: str, attempt: int = 1) -> _StageCtx:
+async def _run_stage(job_id: uuid.UUID, name: str, attempt: int | None = None) -> _StageCtx:
     async with session_scope() as session:
-        await start_stage(session, job_id, name, attempt)
-    return _StageCtx(job_id, name, attempt)
+        row = await start_stage(session, job_id, name, attempt)
+        actual_attempt = row.attempt
+    log.info("pipeline.stage_started", stage=name, attempt=actual_attempt)
+    return _StageCtx(job_id, name, actual_attempt)
 
 
 async def _mark_job_running(job_id: uuid.UUID) -> None:
@@ -107,6 +142,20 @@ async def _mark_job_succeeded(job_id: uuid.UUID) -> None:
             update(AnalysisJob)
             .where(AnalysisJob.id == job_id)
             .values(state="SUCCEEDED", finished_at=datetime.now(UTC))
+        )
+
+
+async def _mark_job_after_failure(job_id: uuid.UUID, error: str, *, terminal: bool) -> None:
+    async with session_scope() as session:
+        await session.execute(
+            update(AnalysisJob)
+            .where(AnalysisJob.id == job_id, AnalysisJob.state == "RUNNING")
+            .values(
+                state="FAILED" if terminal else "QUEUED",
+                started_at=None,
+                finished_at=datetime.now(UTC) if terminal else None,
+                last_error=error[:500],
+            )
         )
 
 
@@ -258,6 +307,11 @@ async def _run_pipeline(job_id: uuid.UUID, correlation_id: str | None) -> dict:
         info = await ffprobe(video_path)
         await stage.complete(output_metadata={"duration_ms": info.duration_ms, "fps": info.fps})
 
+        if not info.has_audio:
+            await _mark_insufficient_data(job_id, "NO_AUDIO_STREAM")
+            log.warning("pipeline.insufficient_data", reason="NO_AUDIO_STREAM")
+            return {"state": "INSUFFICIENT_DATA", "reason": "NO_AUDIO_STREAM"}
+
         # 2. Extract audio
         stage = await _run_stage(job_id, "EXTRACT_AUDIO")
         await extract_audio_pcm(video_path, audio_path)
@@ -273,7 +327,10 @@ async def _run_pipeline(job_id: uuid.UUID, correlation_id: str | None) -> dict:
         stage = await _run_stage(job_id, "EXTRACT_LANDMARKS")
         frames = decode_video_bgr24(video_path)
         face_frames = extract_landmarks_from_frames(
-            frames, info.fps, settings.mediapipe_min_confidence
+            frames,
+            info.fps,
+            settings.mediapipe_min_confidence,
+            settings.mediapipe_model_path,
         )
         if not face_frames:
             await stage.fail("NO_FRAMES")
@@ -379,6 +436,7 @@ async def _run_pipeline(job_id: uuid.UUID, correlation_id: str | None) -> dict:
         phrase_decision_rows: list[dict] = []
         evidence_acc: list[dict] = []
         risk_scores: list[float] = []
+        risk_weights: list[float] = []
 
         async with session_scope() as session:
             for inst in phrase_instances:
@@ -422,7 +480,6 @@ async def _run_pipeline(job_id: uuid.UUID, correlation_id: str | None) -> dict:
                             "evidence": [],
                         }
                     )
-                    risk_scores.append(0.5)
                     continue
                 try:
                     curve_bytes = await s3.get_object(BUCKET_DERIVED, tpl.mean_curve_object_key)
@@ -450,9 +507,25 @@ async def _run_pipeline(job_id: uuid.UUID, correlation_id: str | None) -> dict:
                     for e in m.evidence
                 )
                 risk_scores.append(1.0 - m.similarity)
+                risk_weights.append(max(0.05, float(inst.confidence)))
 
-            risk_score = float(np.mean(risk_scores)) if risk_scores else 0.5
-            if risk_score < settings.decision_risk_consistent_max:
+            mature_count = len(risk_scores)
+            risk_score = (
+                float(np.average(risk_scores, weights=risk_weights)) if risk_scores else 0.5
+            )
+            if mature_count < settings.decision_min_mature_phrases:
+                label = "INSUFFICIENT_DATA"
+                evidence_acc.append(
+                    {
+                        "code": "INSUFFICIENT_COMPARABLE_PHRASES",
+                        "contribution": 0.0,
+                        "message": (
+                            f"Only {mature_count}/{settings.decision_min_mature_phrases} "
+                            "phrases have a mature baseline"
+                        ),
+                    }
+                )
+            elif risk_score < settings.decision_risk_consistent_max:
                 label = "CONSISTENT"
             elif risk_score >= settings.decision_risk_suspicious_min:
                 label = "SUSPICIOUS"
@@ -479,7 +552,13 @@ async def _run_pipeline(job_id: uuid.UUID, correlation_id: str | None) -> dict:
                 .where(AnalysisJob.id == job_id)
                 .values(state="SUCCEEDED", finished_at=datetime.now(UTC))
             )
-        await stage.complete(output_metadata={"n_phrases": len(phrase_decision_rows), "label": label})
+        await stage.complete(
+            output_metadata={
+                "n_phrases": len(phrase_decision_rows),
+                "n_mature_phrases": len(risk_scores),
+                "label": label,
+            }
+        )
 
     elapsed = time.perf_counter() - t0
     return {"state": "SUCCEEDED", "elapsed_seconds": elapsed}

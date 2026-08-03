@@ -185,7 +185,7 @@ class JobStageRepository(BaseRepository[JobStage]):
     async def list_for_job(self, job_id: uuid.UUID) -> list[JobStage]:
         stmt = (
             select(JobStage)
-            .where(JobStage.job_id == job_id)
+            .where(JobStage.job_id == job_id, JobStage.tenant_id == self.tenant_id)
             .order_by(JobStage.started_at.asc().nulls_last())
         )
         result = await self.session.execute(stmt)

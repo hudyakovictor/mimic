@@ -16,5 +16,7 @@ export default defineConfig({
   build: {
     target: 'es2022',
     sourcemap: true,
+    // Keep builds portable when optional native lightningcss binaries are unavailable.
+    cssMinify: false,
   },
 });

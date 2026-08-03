@@ -19,11 +19,22 @@ MODEL_URL = (
 MODEL_DIR = os.path.expanduser("~/.cache/mimicguard")
 
 
-def _ensure_model() -> str:
+def _ensure_model(configured_path: str | None = None) -> str:
+    configured_path = configured_path or os.getenv("MIMICGUARD_MEDIAPIPE_MODEL_PATH")
+    if configured_path:
+        if not os.path.isfile(configured_path):
+            raise RuntimeError(f"Configured MediaPipe model does not exist: {configured_path}")
+        return configured_path
     os.makedirs(MODEL_DIR, exist_ok=True)
     path = os.path.join(MODEL_DIR, "face_landmarker.task")
     if not os.path.exists(path):
-        urllib.request.urlretrieve(MODEL_URL, path)
+        try:
+            urllib.request.urlretrieve(MODEL_URL, path)
+        except Exception as exc:
+            raise RuntimeError(
+                "MediaPipe model is unavailable. Set MIMICGUARD_MEDIAPIPE_MODEL_PATH "
+                "or allow the worker to download the model once."
+            ) from exc
     return path
 
 
@@ -41,6 +52,7 @@ def extract_landmarks_from_frames(
     frames_bgr: Iterable[np.ndarray],
     fps: float,
     min_confidence: float = 0.5,
+    model_path: str | None = None,
 ) -> list[FaceFrame]:
     """Run MediaPipe Face Landmarker on a list of BGR frames.
 
@@ -51,7 +63,7 @@ def extract_landmarks_from_frames(
     from mediapipe.tasks import python as mp_python
     from mediapipe.tasks.python import vision as mp_vision
 
-    model_path = _ensure_model()
+    model_path = _ensure_model(model_path)
     base = mp_python.BaseOptions(model_asset_path=model_path)
     options = mp_vision.FaceLandmarkerOptions(
         base_options=base,

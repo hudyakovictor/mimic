@@ -41,7 +41,10 @@ class DecisionRepository(BaseRepository[Decision]):
         return d
 
     async def list_for_job(self, job_id: uuid.UUID) -> list[Decision]:
-        stmt = select(Decision).where(Decision.job_id == job_id).order_by(desc(Decision.created_at))
+        stmt = select(Decision).where(
+            Decision.job_id == job_id,
+            Decision.tenant_id == self.tenant_id,
+        ).order_by(desc(Decision.created_at))
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
 
@@ -71,7 +74,10 @@ class ReviewRepository(BaseRepository[Review]):
         return r
 
     async def list_for_decision(self, decision_id: uuid.UUID) -> list[Review]:
-        stmt = select(Review).where(Review.decision_id == decision_id).order_by(desc(Review.created_at))
+        stmt = select(Review).where(
+            Review.decision_id == decision_id,
+            Review.tenant_id == self.tenant_id,
+        ).order_by(desc(Review.created_at))
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
 

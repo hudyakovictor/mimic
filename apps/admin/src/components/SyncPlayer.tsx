@@ -244,7 +244,6 @@ export function SyncPlayer({
       if (video && tracks[index]) video.currentTime = tracks[index].startMs / 1000;
     });
     // Track identity, not the array reference, defines a new comparison.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [trackSignature]);
 
   useEffect(() => {

@@ -57,7 +57,7 @@ export function PhraseComparePage() {
             endMs: u.videoOutPointMs,
             label: `${decoded} #${s.id.slice(0, 6)}`,
           });
-        } catch (e) {
+        } catch {
           // skip
         }
       }

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import dramatiq
 from app.settings import get_settings
+from app.observability import configure_logging
 from dramatiq.brokers.redis import RedisBroker
 from dramatiq.middleware import AgeLimit, Retries, TimeLimit
 from dramatiq.middleware.prometheus import Prometheus
@@ -37,6 +38,7 @@ def get_results() -> RedisBackend:
 
 def setup() -> RedisBroker:
     settings = get_settings()
+    configure_logging(settings.log_level, settings.log_file)
     broker = get_broker()
     broker.add_middleware(Prometheus())
     broker.add_middleware(Retries(max_retries=settings.worker_retry_default))

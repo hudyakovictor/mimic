@@ -59,15 +59,17 @@ async def load_asset(session: AsyncSession, asset_id: uuid.UUID) -> Asset:
 
 
 async def start_stage(
-    session: AsyncSession, job_id: uuid.UUID, name: str, attempt: int = 1
+    session: AsyncSession, job_id: uuid.UUID, name: str, attempt: int | None = None
 ) -> JobStage:
+    job = await load_job(session, job_id)
+    actual_attempt = int(attempt if attempt is not None else job.attempt)
     stage = JobStage(
         id=uuid.uuid4(),
-        tenant_id=(await load_job(session, job_id)).tenant_id,
+        tenant_id=job.tenant_id,
         job_id=job_id,
         name=name,
         state="RUNNING",
-        attempt=attempt,
+        attempt=actual_attempt,
         started_at=datetime.now(UTC),
     )
     session.add(stage)

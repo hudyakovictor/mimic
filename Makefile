@@ -1,4 +1,4 @@
-.PHONY: help bootstrap dev test lint typecheck architecture-check seed migrate clean fmt check all
+.PHONY: help bootstrap dev test lint typecheck architecture-check diagnose seed migrate clean fmt check all
 
 help:
 	@echo "MimicGuard — make targets:"
@@ -11,6 +11,7 @@ help:
 	@echo "  typecheck   - mypy + tsc"
 	@echo "  fmt         - ruff format + prettier"
 	@echo "  architecture-check - inventory MG-STUB references"
+	@echo "  diagnose    - run 50 key checks into one JSONL log"
 	@echo "  check       - lint + typecheck + tests"
 	@echo "  clean       - remove build artifacts"
 
@@ -59,6 +60,9 @@ fmt:
 
 architecture-check:
 	PYTHONPATH=services/api:packages python -m tools.check_stubs
+
+diagnose:
+	python tools/diagnose.py --output logs/diagnostics.jsonl
 
 ci: lint typecheck test architecture-check
 	@echo "CI passed."

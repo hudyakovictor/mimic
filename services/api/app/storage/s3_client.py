@@ -33,7 +33,7 @@ class S3Client:
         )
 
     async def _run(self, fn, *args, **kwargs) -> Any:
-        return await asyncio.get_event_loop().run_in_executor(None, partial(fn, *args, **kwargs))
+        return await asyncio.get_running_loop().run_in_executor(None, partial(fn, *args, **kwargs))
 
     async def head_object(self, bucket: str, key: str) -> dict | None:
         try:
@@ -45,7 +45,11 @@ class S3Client:
 
     async def get_object(self, bucket: str, key: str) -> bytes:
         resp = await self._run(self._client.get_object, Bucket=bucket, Key=key)
-        return resp["Body"].read()
+        body = resp["Body"]
+        try:
+            return await self._run(body.read)
+        finally:
+            body.close()
 
     async def put_object(
         self, bucket: str, key: str, body: bytes, content_type: str = "application/octet-stream"

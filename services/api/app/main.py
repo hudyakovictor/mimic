@@ -56,6 +56,7 @@ async def _outbox_relay_loop() -> None:
                 await publisher.publish_pending_outbox(
                     session,
                     batch_size=settings.outbox_batch_size,
+                    max_attempts=settings.outbox_max_attempts,
                 )
         except asyncio.CancelledError:
             raise
@@ -67,7 +68,7 @@ async def _outbox_relay_loop() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
-    configure_logging(settings.log_level)
+    configure_logging(settings.log_level, settings.log_file)
     configure_tracing(settings.service_name, settings.otel_exporter_otlp_endpoint)
     log.info("api.startup", env=settings.env)
 
@@ -115,6 +116,10 @@ def create_app() -> FastAPI:
     async def request_context(request: Request, call_next):
         request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
         request.state.request_id = request_id
+        from structlog.contextvars import bind_contextvars, clear_contextvars
+
+        clear_contextvars()
+        bind_contextvars(request_id=request_id, service="api")
         TenantContext.set(None)  # clear
         start = time.perf_counter()
         HTTP_REQUESTS_IN_FLIGHT.inc()
@@ -122,6 +127,12 @@ def create_app() -> FastAPI:
             response = await call_next(request)
         except Exception:
             HTTP_REQUESTS_IN_FLIGHT.dec()
+            log.exception(
+                "http.request_failed",
+                method=request.method,
+                path=request.url.path,
+                duration_ms=round((time.perf_counter() - start) * 1000, 2),
+            )
             raise
         duration = time.perf_counter() - start
         HTTP_REQUESTS_IN_FLIGHT.dec()
@@ -132,6 +143,13 @@ def create_app() -> FastAPI:
         response.headers["X-Request-ID"] = request_id
         HTTP_REQUESTS_TOTAL.labels(method=method, path=path, status=str(status_code)).inc()
         HTTP_REQUEST_DURATION.labels(method=method, path=path).observe(duration)
+        log.info(
+            "http.request_completed",
+            method=method,
+            path=path,
+            status=status_code,
+            duration_ms=round(duration * 1000, 2),
+        )
         return response
 
     register_exception_handlers(app)

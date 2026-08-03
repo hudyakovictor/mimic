@@ -7,7 +7,7 @@ leakage in logs.
 from functools import lru_cache
 from typing import Annotated, Any, Literal
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     # General
     env: Literal["development", "test", "staging", "production"] = "development"
     log_level: str = "INFO"
+    log_file: str = "logs/mimicguard.jsonl"
     service_name: str = "mimicguard"
 
     # API
@@ -84,9 +85,18 @@ class Settings(BaseSettings):
     # Decision thresholds
     decision_risk_consistent_max: float = 0.35
     decision_risk_suspicious_min: float = 0.65
+    decision_min_mature_phrases: int = 3
     phrase_baseline_min_samples: int = 3
     phrase_baseline_mature_samples: int = 10
     phrase_template_max_samples: int = 50
+
+    @field_validator("decision_risk_suspicious_min")
+    @classmethod
+    def validate_decision_thresholds(cls, value: float, info) -> float:
+        consistent = float(info.data.get("decision_risk_consistent_max", 0.35))
+        if not 0 <= consistent < value <= 1:
+            raise ValueError("decision thresholds must satisfy 0 <= consistent < suspicious <= 1")
+        return value
 
     # Outbox
     outbox_poll_interval_ms: int = 200
@@ -112,6 +122,21 @@ class Settings(BaseSettings):
         if isinstance(value, str) and not value.lstrip().startswith("["):
             return [item.strip() for item in value.split(",") if item.strip()]
         return value
+
+    @model_validator(mode="after")
+    def validate_production_security(self) -> "Settings":
+        if self.env != "production":
+            return self
+        jwt_value = self.jwt_secret.get_secret_value()
+        if len(jwt_value) < 32 or jwt_value in {"dev-secret-change-me", "replace-me"}:
+            raise ValueError("Production JWT_SECRET must be at least 32 characters and non-default")
+        if "*" in self.cors_origins:
+            raise ValueError("Wildcard CORS is forbidden in production")
+        if self.s3_secret_key.get_secret_value() == "change-me-now":
+            raise ValueError("Production S3_SECRET_KEY must not use the development default")
+        if self.default_admin_password == "change-me-now-12chars":
+            raise ValueError("Production DEFAULT_ADMIN_PASSWORD must not use the development default")
+        return self
 
 
 @lru_cache(maxsize=1)

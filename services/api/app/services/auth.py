@@ -38,17 +38,21 @@ class AuthService:
                 count = await self.redis.incr(key)
                 if count == 1:
                     await self.redis.expire(key, 60)
-                if count > 5:
-                    raise UnauthorizedError("Too many login attempts", code="rate_limited")
             except Exception as e:
                 # If Redis is down, do not block login (graceful degradation)
                 log.warning("auth.rate_limit_unavailable", error=str(e))
+            else:
+                if count > 5:
+                    raise UnauthorizedError("Too many login attempts", code="rate_limited")
 
         # Look up user across tenants
         stmt = select(User).where(User.email == email.lower(), User.is_active.is_(True))
         result = await self.session.execute(stmt)
-        user = result.scalar_one_or_none()
-        if user is None or not verify_password(password, user.password_hash):
+        candidates = list(result.scalars().all())
+        if len(candidates) != 1:
+            raise UnauthorizedError("Invalid credentials")
+        user = candidates[0]
+        if not verify_password(password, user.password_hash):
             raise UnauthorizedError("Invalid credentials")
 
         tenant = await self.session.get(Tenant, user.tenant_id)
@@ -85,10 +89,11 @@ class AuthService:
         claims = self.jwt.decode(refresh_token, expect_type="refresh")
         if self.redis is not None:
             try:
-                if await self.jwt.is_revoked(claims.get("jti", "")):
-                    raise UnauthorizedError("Refresh token revoked")
+                revoked = await self.jwt.is_revoked(claims.get("jti", ""))
             except Exception:
-                pass
+                revoked = False
+            if revoked:
+                raise UnauthorizedError("Refresh token revoked")
         user_id = uuid.UUID(claims["sub"])
         tenant_id = uuid.UUID(claims["tid"])
         # Rotation: revoke old (best-effort)
@@ -98,7 +103,7 @@ class AuthService:
             except Exception:
                 pass
         user = await self.session.get(User, user_id)
-        if user is None or not user.is_active:
+        if user is None or not user.is_active or user.tenant_id != tenant_id:
             raise UnauthorizedError("User inactive")
         access, access_ttl = self.jwt.encode_access(user.id, user.tenant_id, user.roles)
         new_refresh = self.jwt.encode_refresh(user.id, user.tenant_id)

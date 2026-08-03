@@ -103,7 +103,14 @@ class AssetService:
     async def prepare_upload(
         self, filename: str, mime: str, size_bytes: int, title: str | None = None
     ) -> dict:
-        ext = os.path.splitext(filename)[1].lstrip(".") or "mp4"
+        allowed_mimes = {"video/mp4", "video/quicktime", "video/webm", "video/x-matroska"}
+        if mime.lower() not in allowed_mimes:
+            raise ValidationFailedError("Unsupported video MIME type")
+        if size_bytes <= 0 or size_bytes > get_settings().max_upload_bytes:
+            raise ValidationFailedError("Video size is outside the configured upload limit")
+        ext = re.sub(r"[^a-z0-9]", "", os.path.splitext(filename)[1].lstrip(".").lower()) or "mp4"
+        if ext not in {"mp4", "mov", "webm", "mkv", "m4v"}:
+            raise ValidationFailedError("Unsupported video file extension")
         asset_id = uuid.uuid4()
         object_key = staging_asset_key(self.tenant_id, asset_id, ext)
         asset = await self.repo.create_pending(
@@ -157,18 +164,17 @@ class AssetService:
                     )
                 try:
                     info = await probe_media(local_path)
-                except ClipTranscodeError:
-                    info = None
-                if info is not None:
-                    if info.duration_ms > get_settings().max_video_duration_seconds * 1000:
-                        raise ValidationFailedError("Video exceeds the maximum source duration")
-                    if not info.has_audio:
-                        raise ValidationFailedError("Video must contain an audio track")
-                    duration_ms = duration_ms or info.duration_ms
-                    width = width or info.width
-                    height = height or info.height
-                    fps = fps or info.fps
-                    has_audio = info.has_audio
+                except ClipTranscodeError as exc:
+                    raise ValidationFailedError(f"Uploaded object is not a valid video: {exc}") from exc
+                if info.duration_ms > get_settings().max_video_duration_seconds * 1000:
+                    raise ValidationFailedError("Video exceeds the maximum source duration")
+                if not info.has_audio:
+                    raise ValidationFailedError("Video must contain an audio track")
+                duration_ms = info.duration_ms
+                width = info.width
+                height = info.height
+                fps = info.fps
+                has_audio = info.has_audio
         except ValidationFailedError:
             raise
         except Exception as exc:
