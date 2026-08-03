@@ -3,6 +3,7 @@
 MG-STUB: final — uses boto3 in a thread executor. All operations are async.
 For local dev, the endpoint points to MinIO.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -77,6 +78,7 @@ class S3Client:
             self._client.generate_presigned_post,
             Bucket=bucket,
             Key=key,
+            Fields={"Content-Type": content_type},
             Conditions=conditions,
             ExpiresIn=ttl,
         )
@@ -85,9 +87,7 @@ class S3Client:
             "fields": {k: str(v) for k, v in presigned["fields"].items()},
         }
 
-    async def generate_presigned_get(
-        self, bucket: str, key: str, ttl: int | None = None
-    ) -> str:
+    async def generate_presigned_get(self, bucket: str, key: str, ttl: int | None = None) -> str:
         ttl = ttl or self.settings.s3_presigned_url_ttl
         return await self._run(
             self._client.generate_presigned_url,
@@ -103,9 +103,60 @@ class S3Client:
             await self._run(self._client.create_bucket, Bucket=bucket)
             log.info("s3_bucket_created", bucket=bucket)
 
-    async def upload_file(self, bucket: str, key: str, file_path: str) -> str:
+    async def configure_staging_lifecycle(self, bucket: str) -> None:
+        """Expire abandoned long source uploads while retaining canonical clips."""
+        await self._run(
+            self._client.put_bucket_lifecycle_configuration,
+            Bucket=bucket,
+            LifecycleConfiguration={
+                "Rules": [
+                    {
+                        "ID": "expire-staging-sources",
+                        "Status": "Enabled",
+                        "Filter": {"Prefix": "staging/"},
+                        "Expiration": {"Days": 1},
+                        "AbortIncompleteMultipartUpload": {"DaysAfterInitiation": 1},
+                    }
+                ]
+            },
+        )
+
+    async def configure_browser_cors(self, bucket: str, allowed_origins: list[str]) -> None:
+        """Allow presigned browser upload/playback without making objects public."""
+        if not allowed_origins:
+            return
+        await self._run(
+            self._client.put_bucket_cors,
+            Bucket=bucket,
+            CORSConfiguration={
+                "CORSRules": [
+                    {
+                        "AllowedOrigins": allowed_origins,
+                        "AllowedMethods": ["GET", "HEAD", "POST", "PUT"],
+                        "AllowedHeaders": ["*"],
+                        "ExposeHeaders": ["ETag"],
+                        "MaxAgeSeconds": 3600,
+                    }
+                ]
+            },
+        )
+
+    async def upload_file(
+        self,
+        bucket: str,
+        key: str,
+        file_path: str,
+        content_type: str = "application/octet-stream",
+    ) -> str:
+        """Multipart-upload a file without loading it into API process memory."""
+
         def _do() -> str:
-            self._client.upload_file(file_path, bucket, key)
+            self._client.upload_file(
+                file_path,
+                bucket,
+                key,
+                ExtraArgs={"ContentType": content_type},
+            )
             return key
 
         return await self._run(_do)

@@ -38,7 +38,7 @@ uv run python -m scripts.seed
 uv run uvicorn services.api.app.main:app --reload --port 8080
 
 # Worker (в другом терминале)
-uv run dramatiq services.worker.broker -p 1 -t 4
+PYTHONPATH=services/api:services/worker:. uv run dramatiq worker.__main__ -p 1 -t 4
 
 # Frontend
 pnpm --dir apps/admin install

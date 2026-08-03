@@ -1,4 +1,5 @@
 """Baseline matching: DTW + Mahalanobis."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -59,11 +60,12 @@ def mahalanobis(x: np.ndarray, mean: np.ndarray, cov_diag: np.ndarray) -> float:
 
 
 def chi2_threshold(dims: int, alpha: float = 0.05) -> float:
-    return float(chi2.ppf(1 - alpha, df=dims))
+    """Threshold for the (non-squared) Mahalanobis distance."""
+    return float(np.sqrt(chi2.ppf(1 - alpha, df=dims)))
 
 
 def features_from_landmarks(arr: np.ndarray) -> np.ndarray:
-    """Compute 8 regional features from a 30×33 normalized landmarks array."""
+    """Compute 8 regional features from a 30x33 normalized landmarks array."""
     if arr.ndim != 2 or arr.shape[0] == 0:
         return np.zeros(8, dtype=np.float32)
     v = arr
@@ -74,9 +76,7 @@ def features_from_landmarks(arr: np.ndarray) -> np.ndarray:
     jaw_open = np.abs(v[:, 25] - v[:, 28])
     cheek_raise = (v[:, 31] + (v[:, 36] if v.shape[1] > 36 else v[:, 31])) / 2
     d_mouth_open = np.gradient(mouth_open) if arr.shape[0] > 1 else np.zeros_like(mouth_open)
-    dd_mouth_open = (
-        np.gradient(d_mouth_open) if arr.shape[0] > 1 else np.zeros_like(mouth_open)
-    )
+    dd_mouth_open = np.gradient(d_mouth_open) if arr.shape[0] > 1 else np.zeros_like(mouth_open)
     return np.array(
         [
             mouth_open.mean(),
@@ -93,7 +93,7 @@ def features_from_landmarks(arr: np.ndarray) -> np.ndarray:
 
 
 def match(probe_lm: np.ndarray, template_mean: np.ndarray, template_regional: dict) -> MatchResult:
-    """Match a probe phrase (30×33) against a template (mean_curve + regional_stats)."""
+    """Match a probe phrase (30x33) against a template (mean_curve + regional_stats)."""
     d, path = dtw_distance(probe_lm, template_mean, window=5)
     slope = dtw_slope(path)
     # Regional Mahalanobis
@@ -116,11 +116,12 @@ def match(probe_lm: np.ndarray, template_mean: np.ndarray, template_regional: di
         ],
         dtype=np.float32,
     )
-    maha = mahalanobis(probe_feats[:4], tmpl_vec, tmpl_sigma)
+    selected_features = probe_feats[[0, 2, 3, 4]]
+    maha = mahalanobis(selected_features, tmpl_vec, tmpl_sigma**2)
     thr = chi2_threshold(4, 0.05)
     dtw_sim = float(np.exp(-d * 5.0))
     maha_sim = 1.0 if maha < thr else float(np.exp(-(maha - thr)))
-    similarity = max(0.0, min(1.0, 0.6 * dtw_sim + 0.4 * maha_sim))
+    similarity = max(0.0, min(1.0, 0.7 * dtw_sim + 0.3 * maha_sim))
     evidence: list[dict] = []
     if d > 0.3:
         evidence.append(
@@ -140,9 +141,14 @@ def match(probe_lm: np.ndarray, template_mean: np.ndarray, template_regional: di
         )
     if maha > thr:
         # Pick a code by which regional stat is most anomalous
-        deltas = np.abs(probe_feats[:4] - tmpl_vec) / tmpl_sigma
+        deltas = np.abs(selected_features - tmpl_vec) / tmpl_sigma
         idx = int(np.argmax(deltas))
-        code = ("MOUTH_CHEEK_LAG", "LIP_ASYMMETRY", "JAW_RANGE_LOW")[idx % 3]
+        code = (
+            "MOUTH_RANGE_HIGH",
+            "MOUTH_RATIO_SHIFT",
+            "LIP_ASYMMETRY",
+            "JAW_RANGE_LOW",
+        )[idx]
         evidence.append(
             {
                 "code": code,

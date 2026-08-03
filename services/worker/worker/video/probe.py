@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -102,20 +103,21 @@ def read_wav_float32(path: str) -> tuple[np.ndarray, int]:
     return audio, sr
 
 
-def decode_video_bgr24(video_path: str) -> list[np.ndarray]:
+def decode_video_bgr24(video_path: str) -> Iterator[np.ndarray]:
+    """Yield decoded frames without retaining the full clip in RAM."""
     import cv2
 
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
+    capture = cv2.VideoCapture(video_path)
+    if not capture.isOpened():
         raise MediaError("Cannot open video")
-    frames: list = []
-    while True:
-        ok, bgr = cap.read()
-        if not ok:
-            break
-        frames.append(bgr)
-    cap.release()
-    return frames
+    try:
+        while True:
+            ok, frame = capture.read()
+            if not ok:
+                break
+            yield frame
+    finally:
+        capture.release()
 
 
 async def cut_clip(video_path: str, start_ms: int, end_ms: int, out_path: str) -> None:

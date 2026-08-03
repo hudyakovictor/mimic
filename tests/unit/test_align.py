@@ -72,6 +72,19 @@ class AlignTests(unittest.TestCase):
         if out:
             self.assertEqual(out[0].landmarks_slice.shape, (30, 33))
 
+    def test_align_builds_bounded_word_combinations(self):
+        words = [
+            {"start_ms": 0, "end_ms": 400, "text": "добрый", "confidence": 0.95},
+            {"start_ms": 450, "end_ms": 900, "text": "день", "confidence": 0.9},
+            {"start_ms": 950, "end_ms": 1350, "text": "москва", "confidence": 0.85},
+        ]
+        lm = self._fake_landmarks(300)
+        audio = np.zeros(16000 * 2, dtype=np.float32)
+        out = align_words_to_landmarks(words, lm, audio, language="ru")
+        labels = {instance.word for instance in out}
+        self.assertIn("добрый день", labels)
+        self.assertIn("добрый день москва", labels)
+
     def test_align_audio_slice_extracted(self):
         words = [{"start_ms": 1000, "end_ms": 1500, "text": "test", "confidence": 0.9}]
         lm = self._fake_landmarks(900)  # 30 sec @ 30fps to cover 1.5s easily

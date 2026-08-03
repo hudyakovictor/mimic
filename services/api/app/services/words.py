@@ -2,6 +2,7 @@
 
 Exposes the accumulated phrase database to the admin UI.
 """
+
 from __future__ import annotations
 
 import io
@@ -10,10 +11,10 @@ import uuid
 import numpy as np
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..db.models import PhraseSample
+from ..db.models import AnalysisJob, Asset, Decision, PhraseSample
 from ..errors import NotFoundError
 from ..repositories.decisions import PhraseSampleRepository, PhraseTemplateRepository
-from ..storage import BUCKET_CLIPS, BUCKET_DERIVED
+from ..storage import BUCKET_CLIPS, BUCKET_DERIVED, BUCKET_VIDEOS
 from ..storage.s3_client import S3Client
 
 
@@ -26,14 +27,23 @@ class WordService:
         self.samples = PhraseSampleRepository(session, tenant_id)
 
     async def list_words(
-        self, language: str | None = None, cursor: str | None = None, limit: int = 50
+        self,
+        language: str | None = None,
+        cursor: str | None = None,
+        limit: int = 50,
+        subject_id: uuid.UUID | None = None,
     ) -> tuple[list[dict], str | None]:
-        return await self.templates.list_distinct_words(language, language, limit)
+        return await self.templates.list_distinct_words(language, cursor, limit, subject_id)
 
     async def list_templates(
-        self, word: str, language: str, cursor: str | None = None, limit: int = 50
+        self,
+        word: str,
+        language: str,
+        cursor: str | None = None,
+        limit: int = 50,
+        subject_id: uuid.UUID | None = None,
     ) -> list[dict]:
-        items, _ = await self.templates.list_for_word(word, language, cursor, limit)
+        items, _ = await self.templates.list_for_word(word, language, cursor, limit, subject_id)
         return [
             {
                 "id": str(t.id),
@@ -50,9 +60,9 @@ class WordService:
             for t in items
         ]
 
-    async def get_template_detail(self, template_id: uuid.UUID) -> dict:
+    async def get_template_detail(self, template_id: uuid.UUID, expected_word: str | None = None) -> dict:
         t = await self.templates.get(template_id)
-        if t is None:
+        if t is None or (expected_word is not None and t.word != expected_word):
             raise NotFoundError("Template not found")
         # Load mean curve from S3
         try:
@@ -67,7 +77,7 @@ class WordService:
         except Exception:
             mean_curve = []
         # Sample IDs
-        samples = await self.samples.list_for_template(template_id, limit=200)
+        samples, _ = await self.samples.list_for_template(template_id, limit=200)
         return {
             "id": str(t.id),
             "subject_id": str(t.subject_id) if t.subject_id else None,
@@ -91,16 +101,37 @@ class WordService:
         items, _ = await self.samples.list_for_template(template_id, cursor, limit)
         return [self._sample_to_dict(s) for s in items]
 
-    async def get_sample_urls(self, sample_id: uuid.UUID) -> dict:
+    async def get_sample_urls(self, sample_id: uuid.UUID, expected_word: str | None = None) -> dict:
         s = await self.samples.get(sample_id)
-        if s is None:
+        if s is None or (expected_word is not None and s.word != expected_word):
             raise NotFoundError("Sample not found")
         video_url = ""
+        video_in_point_ms = 0
+        video_out_point_ms = max(1, s.end_ms - s.start_ms)
         if s.video_clip_object_key:
             video_url = await self.s3.generate_presigned_get(BUCKET_CLIPS, s.video_clip_object_key)
-        elif s.landmarks_object_key:
-            # In dev — landmarks only; serve them as the "video"
-            video_url = await self.s3.generate_presigned_get(BUCKET_CLIPS, s.landmarks_object_key)
+        else:
+            # 80/20 retention: the analysis asset is already a selected short
+            # canonical clip. Reuse it instead of duplicating one MP4 per word.
+            from sqlalchemy import select
+
+            asset_stmt = (
+                select(Asset)
+                .join(AnalysisJob, AnalysisJob.asset_id == Asset.id)
+                .join(Decision, Decision.job_id == AnalysisJob.id)
+                .where(
+                    Decision.id == s.decision_id,
+                    Decision.tenant_id == self.tenant_id,
+                    Asset.tenant_id == self.tenant_id,
+                    Asset.state == "READY",
+                )
+                .limit(1)
+            )
+            asset = (await self.session.execute(asset_stmt)).scalar_one_or_none()
+            if asset is not None:
+                video_url = await self.s3.generate_presigned_get(BUCKET_VIDEOS, asset.object_key)
+                video_in_point_ms = s.start_ms
+                video_out_point_ms = s.end_ms
         landmarks_url = ""
         if s.landmarks_object_key:
             landmarks_url = await self.s3.generate_presigned_get(BUCKET_CLIPS, s.landmarks_object_key)
@@ -111,18 +142,25 @@ class WordService:
             "video_clip_url": video_url,
             "landmarks_url": landmarks_url,
             "audio_clip_url": audio_url,
+            "video_in_point_ms": video_in_point_ms,
+            "video_out_point_ms": video_out_point_ms,
             "expires_in": 300,
         }
 
     async def list_samples_for_word(
-        self, word: str, language: str, template_id: uuid.UUID | None = None, limit: int = 200
+        self,
+        word: str,
+        language: str,
+        template_id: uuid.UUID | None = None,
+        limit: int = 200,
+        subject_id: uuid.UUID | None = None,
     ) -> list[dict]:
         if template_id is not None:
             items, _ = await self.samples.list_for_template(template_id, limit=limit)
             return [self._sample_to_dict(s) for s in items]
         return [
             self._sample_to_dict(s)
-            for s in await self.samples.list_for_word_across_versions(word, language, limit)
+            for s in await self.samples.list_for_word_across_versions(word, language, limit, subject_id)
         ]
 
     def _sample_to_dict(self, s: PhraseSample) -> dict:

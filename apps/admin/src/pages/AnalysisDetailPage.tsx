@@ -209,7 +209,10 @@ export function AnalysisDetailPage() {
               <h2>Распознанные слова</h2>
               <p>Сравнение с персональным baseline по каждому слову</p>
             </div>
-            <Link to={`/words/${dec.phraseInstances[0].word}/compare`} className="btn btn--secondary btn--sm">
+            <Link
+              to={`/words/${encodeURIComponent(dec.phraseInstances[0].word)}/compare?lang=${dec.phraseInstances[0].language}&subject=${job.subjectId}`}
+              className="btn btn--secondary btn--sm"
+            >
               Сравнить
             </Link>
           </div>
@@ -228,7 +231,7 @@ export function AnalysisDetailPage() {
                 {dec.phraseInstances.map((pi, i) => (
                   <tr key={i}>
                     <td>
-                      <Link to={`/words/${pi.word}`}>{pi.word}</Link>
+                      <Link to={`/words/${encodeURIComponent(pi.word)}?lang=${pi.language}&subject=${job.subjectId}`}>{pi.word}</Link>
                     </td>
                     <td className="text-sm muted">
                       {formatTime(pi.startMs)} – {formatTime(pi.endMs)}

@@ -114,11 +114,11 @@ export function AnalysesPage() {
       {showNew && (
         <NewAnalysisDialog
           onClose={() => setShowNew(false)}
-          onCreated={(job) => {
+          onCreated={(jobs) => {
             setShowNew(false);
-            push({ message: 'Анализ создан', kind: 'success' });
+            push({ message: `Запущено анализов: ${jobs.length}`, kind: 'success' });
             qc.invalidateQueries({ queryKey: ['jobs'] });
-            window.location.assign(`/analyses/${job.id}`);
+            if (jobs.length === 1) window.location.assign(`/analyses/${jobs[0].id}`);
           }}
         />
       )}

@@ -1,5 +1,6 @@
-"""Worker service package.
+"""MimicGuard worker package.
 
-Run with:
-    PYTHONPATH=. dramatiq services.worker.app.broker -p 2 -t 4
+Run from the repository root with::
+
+    PYTHONPATH=services/api:services/worker:. dramatiq worker.__main__ -p 2 -t 4
 """

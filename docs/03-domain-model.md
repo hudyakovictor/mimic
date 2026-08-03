@@ -72,7 +72,9 @@ Asset (video) ── AnalysisJob ─── LandmarkSequence
 - Decision-скор учитывает последнюю ACTIVE-версию шаблона; исторические Decision-ы остаются привязаны к своим версиям.
 
 ## Retention
-- Raw video: настраиваемая (default 90 дней после последнего доступа).
-- Derived landmarks: 365 дней.
-- Decisions + reviews + audit: 7 лет (для compliance).
+- Длинный raw upload: временный staging object; после успешной нарезки выбранных участков удаляется по умолчанию, незавершённые upload очищаются за 24 часа.
+- Canonical analysis clips: только выбранные оператором интервалы, срок задаётся consent policy субъекта.
+- PhraseSample переиспользует canonical clip через in/out points; отдельный MP4 на каждое слово не дублируется.
+- Derived landmarks: MGML + gzip, срок задаётся consent policy (default 365 дней).
+- Decisions + reviews + audit: policy/legal hold (не автоматически «7 лет» для всех юрисдикций).
 - При удалении Subject: tombstone + audit + удаление biometric artifacts согласно политике.

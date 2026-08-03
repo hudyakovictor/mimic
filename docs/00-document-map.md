@@ -26,6 +26,7 @@
 - `11-local-development.md` — запуск на Apple Silicon / Linux
 - `12-implementation-roadmap.md` — порядок реализации
 - `13-deployment.md` — production deployment
+- `15-stack-and-validation-2026.md` — актуальный стек, storage 80/20 и честная валидация цели 95%
 - `14-runbooks/` — incident runbooks
   - `worker-stuck.md`
   - `model-drift.md`

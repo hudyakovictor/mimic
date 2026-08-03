@@ -1,32 +1,33 @@
-// New analysis dialog: 3 modes (file upload, direct URL, YouTube URL)
-// On success: poll import task until asset READY, then create job.
-
 import { useEffect, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, ApiError } from '../api/client';
 import { useToasts } from '../stores/auth';
 import type { AnalysisJob, Asset } from '../types';
+import { ClipEditor, type SelectedInterval } from './ClipEditor';
 
 type Mode = 'upload' | 'url' | 'youtube';
+type Phase = 'compose' | 'uploading' | 'importing' | 'trim' | 'clipping' | 'failed';
 
 export function NewAnalysisDialog({
   onClose,
   onCreated,
 }: {
   onClose: () => void;
-  onCreated: (job: AnalysisJob) => void;
+  onCreated: (jobs: AnalysisJob[]) => void;
 }) {
   const [mode, setMode] = useState<Mode>('upload');
   const [title, setTitle] = useState('');
   const [file, setFile] = useState<File | null>(null);
   const [url, setUrl] = useState('');
   const [subjectId, setSubjectId] = useState('');
-  const [phase, setPhase] = useState<'compose' | 'uploading' | 'importing' | 'ready' | 'failed'>('compose');
+  const [phase, setPhase] = useState<Phase>('compose');
   const [progress, setProgress] = useState(0);
   const [errMsg, setErrMsg] = useState<string | null>(null);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const push = useToasts((s) => s.push);
-  const qc = useQueryClient();
+  const [sourceAsset, setSourceAsset] = useState<Asset | null>(null);
+  const [previewUrl, setPreviewUrl] = useState('');
+  const localPreviewRef = useRef<string | null>(null);
+  const push = useToasts((state) => state.push);
+  const queryClient = useQueryClient();
 
   const { data: subjects = [] } = useQuery({
     queryKey: ['subjects'],
@@ -34,227 +35,259 @@ export function NewAnalysisDialog({
   });
 
   useEffect(() => {
-    if (subjects.length > 0 && !subjectId) setSubjectId(subjects[0].id);
+    const firstGranted = subjects.find((subject) => subject.consentState === 'GRANTED');
+    if (!subjectId && firstGranted) setSubjectId(firstGranted.id);
   }, [subjects, subjectId]);
 
-  const submit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  useEffect(
+    () => () => {
+      if (localPreviewRef.current) URL.revokeObjectURL(localPreviewRef.current);
+    },
+    [],
+  );
+
+  const showClipEditor = async (asset: Asset, localFile?: File) => {
+    setSourceAsset(asset);
+    if (localPreviewRef.current) URL.revokeObjectURL(localPreviewRef.current);
+    if (localFile) {
+      const objectUrl = URL.createObjectURL(localFile);
+      localPreviewRef.current = objectUrl;
+      setPreviewUrl(objectUrl);
+    } else {
+      const result = await api.getAssetDownloadUrl(asset.id);
+      setPreviewUrl(result.url);
+    }
+    setPhase('trim');
+  };
+
+  const submitSource = async (event: React.FormEvent) => {
+    event.preventDefault();
     setErrMsg(null);
     if (!subjectId) {
-      setErrMsg('Выберите субъекта');
+      setErrMsg('Выберите субъекта с подтверждённым согласием.');
       return;
     }
     try {
       let asset: Asset;
       if (mode === 'upload') {
         if (!file) {
-          setErrMsg('Выберите файл');
+          setErrMsg('Выберите видеофайл.');
           return;
         }
         setPhase('uploading');
-        const prep = await api.prepareUpload({
+        const prepared = await api.prepareUpload({
           filename: file.name,
           mime: file.type || 'video/mp4',
           sizeBytes: file.size,
           title: title || file.name,
         });
-        // Direct PUT to S3
         await new Promise<void>((resolve, reject) => {
           const xhr = new XMLHttpRequest();
-          xhr.upload.addEventListener('progress', (ev) => {
-            if (ev.lengthComputable) setProgress(ev.loaded / ev.total);
+          xhr.upload.addEventListener('progress', (uploadEvent) => {
+            if (uploadEvent.lengthComputable) setProgress(uploadEvent.loaded / uploadEvent.total);
           });
           xhr.addEventListener('load', () => {
             if (xhr.status >= 200 && xhr.status < 300) resolve();
-            else reject(new Error(`Upload failed: ${xhr.status}`));
+            else reject(new Error(`S3 upload failed (${xhr.status})`));
           });
-          xhr.addEventListener('error', () => reject(new Error('Network error')));
-          const fd = new FormData();
-          Object.entries(prep.fields).forEach(([k, v]) => fd.append(k, v));
-          fd.append('file', file);
-          xhr.open('PUT', prep.uploadUrl);
-          xhr.send(fd);
+          xhr.addEventListener('error', () => reject(new Error('Сетевая ошибка при загрузке.')));
+          const body = new FormData();
+          Object.entries(prepared.fields).forEach(([key, value]) => body.append(key, value));
+          if (!prepared.fields['Content-Type']) body.append('Content-Type', file.type || 'video/mp4');
+          body.append('file', file);
+          xhr.open('POST', prepared.uploadUrl);
+          xhr.send(body);
         });
-        // Compute SHA-256
         setProgress(1);
-        const buf = await file.arrayBuffer();
-        const hash = await crypto.subtle.digest('SHA-256', buf);
-        const sha = Array.from(new Uint8Array(hash))
-          .map((b) => b.toString(16).padStart(2, '0'))
-          .join('');
-        asset = await api.completeUpload(prep.assetId, { sha256: sha, hasAudio: true });
-        setPhase('ready');
-        push({ message: 'Видео загружено', kind: 'success' });
+        // The API streams the object to compute the authoritative SHA-256;
+        // the browser never allocates a second copy of a potentially 1 GB file.
+        asset = await api.completeUpload(prepared.assetId, { hasAudio: true });
+        push({ message: 'Исходное видео загружено. Выберите участки.', kind: 'success' });
+        await showClipEditor(asset, file);
       } else {
-        setPhase('importing');
-        const result = await api.importFromUrl(url, title || undefined);
-        if (!result.assetId) {
-          throw new Error(result.error || 'Импорт не удался');
+        if (!url) {
+          setErrMsg('Укажите ссылку на видео.');
+          return;
         }
-        // Poll until READY
+        setPhase('importing');
+        const imported = await api.importFromUrl(url, title || undefined);
+        if (!imported.assetId) throw new Error(imported.error || 'Импорт не удался.');
         let attempts = 0;
-        while (attempts < 60) {
-          await new Promise((r) => setTimeout(r, 2000));
-          const list = await api.listAssets();
-          const a = list.find((x) => x.id === result.assetId);
-          if (a?.state === 'READY') {
-            asset = a;
+        while (attempts < 150) {
+          await new Promise((resolve) => window.setTimeout(resolve, 2_000));
+          const current = await api.getAsset(imported.assetId);
+          if (current.state === 'READY') {
+            asset = current;
             break;
           }
-          if (a?.state === 'FAILED') {
-            throw new Error(a.failureReason || 'Импорт не удался');
+          if (current.state === 'FAILED') {
+            throw new Error(current.failureReason || 'Импорт не удался.');
           }
-          attempts++;
+          attempts += 1;
         }
-        if (!asset!) {
-          throw new Error('Импорт занимает слишком долго');
-        }
-        setPhase('ready');
-        push({ message: 'Видео импортировано', kind: 'success' });
+        if (!asset!) throw new Error('Импорт занимает слишком долго. Попробуйте позже.');
+        push({ message: 'Видео импортировано. Выберите участки.', kind: 'success' });
+        await showClipEditor(asset);
       }
-
-      // Create job
-      const job = await api.createJob({ assetId: asset!.id, claimedPersonId: subjectId });
-      qc.invalidateQueries({ queryKey: ['jobs'] });
-      onCreated(job);
-    } catch (e) {
-      const err = e as ApiError | Error;
-      setErrMsg((err as Error).message || 'Ошибка');
+    } catch (error) {
+      const exception = error as ApiError | Error;
+      setErrMsg(exception.message || 'Не удалось подготовить видео.');
       setPhase('failed');
     }
   };
+
+  const createAnalyses = async (intervals: SelectedInterval[], deleteSource: boolean) => {
+    if (!sourceAsset) return;
+    setErrMsg(null);
+    setPhase('clipping');
+    try {
+      const result = await api.createClips(sourceAsset.id, {
+        intervals: intervals.map((interval) => ({
+          startMs: interval.startMs,
+          endMs: interval.endMs,
+          label: interval.label,
+        })),
+        deleteSource,
+      });
+      // Independent clips enter the queue together; one slow fragment does not
+      // delay registration of the others.
+      const jobs = await Promise.all(
+        result.clips.map((clip) =>
+          api.createJob({ assetId: clip.id, claimedPersonId: subjectId }),
+        ),
+      );
+      queryClient.invalidateQueries({ queryKey: ['jobs'] });
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] });
+      push({
+        message: `${jobs.length} ${jobs.length === 1 ? 'анализ создан' : 'анализа запущены параллельно'}`,
+        kind: 'success',
+      });
+      onCreated(jobs);
+    } catch (error) {
+      const exception = error as ApiError | Error;
+      setErrMsg(exception.message || 'Не удалось нарезать видео.');
+      setPhase('trim');
+    }
+  };
+
+  const busy = phase === 'uploading' || phase === 'importing' || phase === 'clipping';
 
   return (
     <div
       role="dialog"
       aria-modal="true"
       aria-label="Новый анализ"
-      style={{
-        position: 'fixed',
-        inset: 0,
-        background: 'rgba(0,0,0,0.4)',
-        display: 'grid',
-        placeItems: 'center',
-        zIndex: 100,
-      }}
-      onClick={onClose}
+      className="dialog-backdrop"
+      onClick={() => !busy && onClose()}
     >
-      <form
-        className="card"
-        style={{ padding: 24, width: 520, maxWidth: '92vw' }}
-        onClick={(e) => e.stopPropagation()}
-        onSubmit={submit}
-      >
-        <div className="row row--between" style={{ marginBottom: 12 }}>
-          <h2>Новый анализ</h2>
-          <button type="button" className="btn btn--ghost" onClick={onClose} aria-label="Закрыть">
-            ✕
-          </button>
+      {phase === 'trim' || phase === 'clipping' ? (
+        <div className="card clip-editor-dialog" onClick={(event) => event.stopPropagation()}>
+          <ClipEditor
+            videoUrl={previewUrl}
+            knownDurationMs={sourceAsset?.durationMs}
+            sourceSizeBytes={sourceAsset?.sizeBytes}
+            busy={phase === 'clipping'}
+            onBack={() => setPhase('compose')}
+            onSubmit={createAnalyses}
+          />
+          {errMsg && <div className="error mt-2">{errMsg}</div>}
         </div>
-
-        <div className="filter-bar">
-          {(['upload', 'url', 'youtube'] as Mode[]).map((m) => (
-            <button
-              key={m}
-              type="button"
-              className={`btn ${mode === m ? '' : 'btn--secondary'} btn--sm`}
-              onClick={() => setMode(m)}
-            >
-              {m === 'upload' ? 'Файл' : m === 'url' ? 'Ссылка' : 'YouTube'}
+      ) : (
+        <form className="card new-analysis" onClick={(event) => event.stopPropagation()} onSubmit={submitSource}>
+          <div className="row row--between" style={{ marginBottom: 12 }}>
+            <div>
+              <p className="eyebrow">Шаг 1 из 2</p>
+              <h2>Добавить видео</h2>
+            </div>
+            <button type="button" className="btn btn--ghost" onClick={onClose} aria-label="Закрыть">
+              ✕
             </button>
-          ))}
-        </div>
-
-        {mode === 'upload' ? (
-          <div className="field">
-            <label>Видео файл</label>
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="video/*"
-              onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-            />
-            {file && (
-              <small className="muted">
-                {file.name} · {(file.size / 1024 / 1024).toFixed(1)} MB
-              </small>
-            )}
           </div>
-        ) : (
-          <div className="field">
-            <label>{mode === 'youtube' ? 'YouTube URL' : 'Прямая ссылка на mp4'}</label>
-            <input
-              className="input"
-              type="url"
-              placeholder={mode === 'youtube' ? 'https://youtu.be/…' : 'https://example.com/video.mp4'}
-              value={url}
-              onChange={(e) => setUrl(e.target.value)}
-              required
-            />
-          </div>
-        )}
 
-        <div className="field">
-          <label>Название (опционально)</label>
-          <input className="input" value={title} onChange={(e) => setTitle(e.target.value)} />
-        </div>
-
-        <div className="field">
-          <label>Субъект</label>
-          <select className="select" value={subjectId} onChange={(e) => setSubjectId(e.target.value)} required>
-            <option value="">— выберите —</option>
-            {subjects.map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.displayName || s.externalId} · {s.consentState}
-              </option>
+          <div className="source-tabs" role="tablist" aria-label="Источник видео">
+            {(['upload', 'url', 'youtube'] as Mode[]).map((sourceMode) => (
+              <button
+                key={sourceMode}
+                type="button"
+                role="tab"
+                aria-selected={mode === sourceMode}
+                className={mode === sourceMode ? 'source-tab source-tab--active' : 'source-tab'}
+                onClick={() => setMode(sourceMode)}
+              >
+                <span>{sourceMode === 'upload' ? '↑' : sourceMode === 'url' ? '↗' : '▶'}</span>
+                {sourceMode === 'upload' ? 'Файл' : sourceMode === 'url' ? 'MP4-ссылка' : 'YouTube'}
+              </button>
             ))}
-          </select>
-          {subjects.length === 0 && (
-            <small className="error">
-              Сначала создайте субъекта и получите согласие. <a href="/subjects">Открыть</a>
-            </small>
-          )}
-        </div>
+          </div>
 
-        {phase === 'uploading' && (
-          <div className="mt-2">
-            <small className="muted">Загрузка: {Math.round(progress * 100)}%</small>
-            <div style={{ height: 4, background: 'var(--surface-2)', borderRadius: 2, marginTop: 4 }}>
-              <div
-                style={{
-                  width: `${progress * 100}%`,
-                  height: '100%',
-                  background: 'var(--accent)',
-                  borderRadius: 2,
-                  transition: 'width 0.2s',
-                }}
+          {mode === 'upload' ? (
+            <label className="upload-dropzone">
+              <input
+                type="file"
+                accept="video/mp4,video/quicktime,video/webm,video/x-matroska"
+                onChange={(event) => setFile(event.target.files?.[0] ?? null)}
+              />
+              <span className="upload-dropzone__icon">↑</span>
+              <strong>{file ? file.name : 'Выберите видеофайл'}</strong>
+              <small>{file ? `${(file.size / 1024 / 1024).toFixed(1)} MB` : 'MP4, MOV, WebM или MKV · до 1 GB'}</small>
+            </label>
+          ) : (
+            <div className="field">
+              <label>{mode === 'youtube' ? 'Ссылка YouTube' : 'Прямая HTTPS-ссылка на видео'}</label>
+              <input
+                className="input"
+                type="url"
+                placeholder={mode === 'youtube' ? 'https://youtu.be/…' : 'https://example.com/video.mp4'}
+                value={url}
+                onChange={(event) => setUrl(event.target.value)}
+                required
               />
             </div>
+          )}
+
+          <div className="grid grid--2">
+            <div className="field">
+              <label>Название</label>
+              <input className="input" placeholder="Например, интервью 30 июля" value={title} onChange={(event) => setTitle(event.target.value)} />
+            </div>
+            <div className="field">
+              <label>Заявленный человек</label>
+              <select className="select" value={subjectId} onChange={(event) => setSubjectId(event.target.value)} required>
+                <option value="">— выберите —</option>
+                {subjects.map((subject) => (
+                  <option key={subject.id} value={subject.id} disabled={subject.consentState !== 'GRANTED'}>
+                    {subject.displayName || subject.externalId} · {subject.consentState === 'GRANTED' ? 'согласие есть' : 'нет согласия'}
+                  </option>
+                ))}
+              </select>
+            </div>
           </div>
-        )}
-        {phase === 'importing' && (
-          <small className="muted mt-2">Импортируем видео (это может занять несколько минут)…</small>
-        )}
 
-        {errMsg && <div className="error mt-2">{errMsg}</div>}
+          {phase === 'uploading' && (
+            <div className="upload-progress">
+              <div className="row row--between text-xs">
+                <span>Загрузка исходника</span>
+                <strong>{Math.round(progress * 100)}%</strong>
+              </div>
+              <div className="upload-progress__track"><div style={{ width: `${progress * 100}%` }} /></div>
+            </div>
+          )}
+          {phase === 'importing' && <div className="notice mt-2">Импортируем и проверяем видео. YouTube может занять несколько минут…</div>}
+          {errMsg && <div className="error mt-2">{errMsg}</div>}
 
-        <div className="row gap-2 mt-3" style={{ justifyContent: 'flex-end' }}>
-          <button type="button" className="btn btn--secondary" onClick={onClose}>
-            Отмена
-          </button>
-          <button
-            type="submit"
-            className="btn"
-            disabled={phase === 'uploading' || phase === 'importing'}
-          >
-            {phase === 'uploading'
-              ? 'Загрузка…'
-              : phase === 'importing'
-              ? 'Импорт…'
-              : 'Создать анализ'}
-          </button>
-        </div>
-      </form>
+          <div className="notice notice--storage mt-3">
+            <strong>Экономия места включена</strong>
+            <span>На следующем шаге вы выберете нужные участки. Они сохранятся в H.264 CRF 17 без заметного ущерба для анализа мимики; длинный исходник можно удалить.</span>
+          </div>
+
+          <div className="row gap-2 mt-3" style={{ justifyContent: 'flex-end' }}>
+            <button type="button" className="btn btn--secondary" onClick={onClose} disabled={busy}>Отмена</button>
+            <button type="submit" className="btn" disabled={busy || !subjectId}>
+              {phase === 'uploading' ? 'Загрузка…' : phase === 'importing' ? 'Импорт…' : phase === 'failed' ? 'Повторить' : 'Продолжить к выбору участков →'}
+            </button>
+          </div>
+        </form>
+      )}
     </div>
   );
 }

@@ -158,7 +158,7 @@ class Asset(Base, TenantScopedMixin, TimestampedMixin):
     __tablename__ = "assets"
 
     id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
-    source_type: Mapped[str] = mapped_column(String(32), nullable=False)  # UPLOAD|YOUTUBE|URL
+    source_type: Mapped[str] = mapped_column(String(32), nullable=False)  # UPLOAD|YOUTUBE|URL|CLIP
     source_url: Mapped[str | None] = mapped_column(String(1024))
     object_key: Mapped[str] = mapped_column(String(512), nullable=False)
     mime: Mapped[str] = mapped_column(String(128), nullable=False)

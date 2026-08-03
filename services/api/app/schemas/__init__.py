@@ -16,7 +16,7 @@ JobStatus = Literal["QUEUED", "RUNNING", "SUCCEEDED", "FAILED", "INSUFFICIENT_DA
 DecisionLabel = Literal["CONSISTENT", "SUSPICIOUS", "INSUFFICIENT_DATA"]
 ReviewVerdict = Literal["CONFIRMED_GENUINE", "CONFIRMED_SUSPICIOUS", "UNDECIDABLE"]
 AssetState = Literal["PENDING_UPLOAD", "UPLOADING", "READY", "FAILED", "DELETED"]
-AssetSourceType = Literal["UPLOAD", "YOUTUBE", "URL"]
+AssetSourceType = Literal["UPLOAD", "YOUTUBE", "URL", "CLIP"]
 ConsentState = Literal["PENDING", "GRANTED", "REVOKED"]
 ModelKind = Literal["LANDMARK_EXTRACTOR", "ASR", "MOTION_SCORER", "CALIBRATION"]
 ModelState = Literal["DRAFT", "VALIDATED", "SHADOW", "ACTIVE", "RETIRED"]
@@ -86,7 +86,9 @@ class PrepareUploadResponse(APIModel):
 
 
 class CompleteUploadRequest(APIModel):
-    sha256: str = Field(min_length=64, max_length=64)
+    # Optional client digest; the API always computes the authoritative digest
+    # by streaming the uploaded object, avoiding a 1 GB browser ArrayBuffer.
+    sha256: str | None = Field(default=None, min_length=64, max_length=64)
     etag: str | None = None
     duration_ms: int | None = Field(default=None, ge=0)
     width: int | None = Field(default=None, ge=0)
@@ -108,6 +110,24 @@ class ImportTaskStatus(APIModel):
     error: str | None = None
 
 
+class ClipIntervalRequest(APIModel):
+    start_ms: int = Field(ge=0)
+    end_ms: int = Field(gt=0)
+    label: str = Field(default="", max_length=128)
+
+
+class CreateClipsRequest(APIModel):
+    intervals: list[ClipIntervalRequest] = Field(min_length=1, max_length=20)
+    delete_source: bool = True
+
+
+class CreateClipsResponse(APIModel):
+    clips: list["AssetOut"]
+    source_deleted: bool
+    codec_profile: str = "analysis-v1"
+    total_duration_ms: int
+
+
 class AssetOut(APIModel):
     id: uuid.UUID
     source_type: AssetSourceType
@@ -123,6 +143,7 @@ class AssetOut(APIModel):
     state: AssetState
     title: str | None
     failure_reason: str | None
+    extra: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
 
 
@@ -149,6 +170,14 @@ class JobStageOut(APIModel):
     completed_at: datetime | None
     error: str | None
     output_uri: str | None
+
+
+class JobArtifactsResponse(APIModel):
+    video_url: str
+    landmarks_url: str | None = None
+    duration_ms: int
+    fps: float
+    expires_in: int
 
 
 class JobOut(APIModel):
@@ -216,6 +245,7 @@ class EnrollmentOut(APIModel):
 class WordSummary(APIModel):
     word: str
     language: str
+    subject_id: uuid.UUID | None = None
     n_templates: int
     n_samples: int
     has_mature_baseline: bool
@@ -265,6 +295,8 @@ class SampleUrlsResponse(APIModel):
     video_clip_url: str
     landmarks_url: str
     audio_clip_url: str | None = None
+    video_in_point_ms: int = 0
+    video_out_point_ms: int
     expires_in: int
 
 
@@ -389,4 +421,5 @@ class Page(APIModel):
 
 
 # Resolve forward refs
+CreateClipsResponse.model_rebuild()
 JobOut.model_rebuild()

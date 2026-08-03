@@ -1,10 +1,10 @@
 """Asset repository."""
+
 from __future__ import annotations
 
 import uuid
 
 from sqlalchemy import select
-from sqlalchemy.orm import attributes
 
 from ..db.models import Asset
 from .base import BaseRepository
@@ -23,9 +23,10 @@ class AssetRepository(BaseRepository[Asset]):
         source_url: str | None = None,
         title: str | None = None,
         extra: dict | None = None,
+        asset_id: uuid.UUID | None = None,
     ) -> Asset:
         a = Asset(
-            id=uuid.uuid4(),
+            id=asset_id or uuid.uuid4(),
             tenant_id=self.tenant_id,
             source_type=source_type,
             source_url=source_url,
@@ -46,7 +47,6 @@ class AssetRepository(BaseRepository[Asset]):
         a = await self.get(asset_id)
         if a is None:
             return
-        attributes.flag_dirty(a, "state")
         a.state = "UPLOADING"
         await self.session.flush()
 
@@ -59,6 +59,7 @@ class AssetRepository(BaseRepository[Asset]):
         height: int | None,
         fps: float | None,
         has_audio: bool,
+        size_bytes: int | None = None,
     ) -> Asset:
         a = await self.get(asset_id)
         if a is None:
@@ -69,7 +70,19 @@ class AssetRepository(BaseRepository[Asset]):
         a.height = height
         a.fps = fps
         a.has_audio = has_audio
+        if size_bytes is not None:
+            a.size_bytes = size_bytes
         a.state = "READY"
+        await self.session.flush()
+        return a
+
+    async def mark_deleted(self, asset_id: uuid.UUID, *, reason: str) -> Asset:
+        a = await self.get(asset_id)
+        if a is None:
+            raise ValueError("Asset not found")
+        a.state = "DELETED"
+        a.failure_reason = reason[:500]
+        a.extra = {**(a.extra or {}), "deleted_reason": reason[:500]}
         await self.session.flush()
         return a
 

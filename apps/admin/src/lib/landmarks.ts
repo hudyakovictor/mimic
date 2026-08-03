@@ -16,7 +16,12 @@ export interface LoadedLandmarks {
 export async function fetchLandmarks(url: string): Promise<LoadedLandmarks> {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Failed to load landmarks: ${res.status}`);
-  const buf = new Uint8Array(await res.arrayBuffer());
+  let buf = new Uint8Array(await res.arrayBuffer());
+  if (buf[0] === 0x1f && buf[1] === 0x8b) {
+    const compressed = new Blob([buf.slice().buffer]).stream();
+    const decompressed = compressed.pipeThrough(new DecompressionStream('gzip'));
+    buf = new Uint8Array(await new Response(decompressed).arrayBuffer());
+  }
   // Find first newline
   let nl = 0;
   for (; nl < buf.length; nl++) {
@@ -25,12 +30,10 @@ export async function fetchLandmarks(url: string): Promise<LoadedLandmarks> {
   const header = JSON.parse(new TextDecoder().decode(buf.subarray(0, nl)));
   const [T, N, C] = header.shape as [number, number, number];
   const pointsCount = T * N * C * 4; // float32 bytes
-  const pointsBuf = buf.subarray(nl + 1, nl + 1 + pointsCount);
-  const pointsFlat = new Float32Array(
-    pointsBuf.buffer,
-    pointsBuf.byteOffset,
-    pointsBuf.byteLength / 4,
-  );
+  const pointsBuf = buf.slice(nl + 1, nl + 1 + pointsCount);
+  // JSON header length is not guaranteed to be 4-byte aligned. `slice`
+  // creates an aligned buffer and avoids RangeError in Float32Array.
+  const pointsFlat = new Float32Array(pointsBuf.buffer);
   // Split per frame
   const stride = N * C;
   const points: Float32Array[] = new Array(T);
@@ -38,8 +41,8 @@ export async function fetchLandmarks(url: string): Promise<LoadedLandmarks> {
     points[i] = pointsFlat.subarray(i * stride, (i + 1) * stride);
   }
   const metaCount = (header.meta_shape?.[0] ?? T) * (header.meta_shape?.[1] ?? 4) * 4;
-  const metaBuf = buf.subarray(nl + 1 + pointsCount, nl + 1 + pointsCount + metaCount);
-  const meta = new Float32Array(metaBuf.buffer, metaBuf.byteOffset, metaBuf.byteLength / 4);
+  const metaBuf = buf.slice(nl + 1 + pointsCount, nl + 1 + pointsCount + metaCount);
+  const meta = new Float32Array(metaBuf.buffer);
   const metaStride = (header.meta_shape?.[1] ?? 4) as number;
   const timestamps = new Float32Array(T);
   const confidences = new Float32Array(T);

@@ -2,8 +2,10 @@
 
 MG-STUB: final — wires middleware, routers, error handlers, startup/shutdown.
 """
+
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -40,6 +42,28 @@ from .storage import init_buckets
 log = get_logger(__name__)
 
 
+async def _outbox_relay_loop() -> None:
+    """Continuously deliver transactional outbox rows after DB commit."""
+    from .db.session import session_scope
+    from .dependencies import get_redis
+    from .events.publisher import get_publisher
+
+    settings = get_settings()
+    publisher = get_publisher(await get_redis())
+    while True:
+        try:
+            async with session_scope() as session:
+                await publisher.publish_pending_outbox(
+                    session,
+                    batch_size=settings.outbox_batch_size,
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.warning("outbox.relay_iteration_failed", error=str(exc))
+        await asyncio.sleep(settings.outbox_poll_interval_ms / 1000)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
@@ -56,10 +80,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception as e:
         log.warning("api.startup.storage_init_failed", error=str(e))
 
-    yield
-
-    log.info("api.shutdown")
-    await close_db()
+    relay_task = asyncio.create_task(_outbox_relay_loop(), name="outbox-relay")
+    try:
+        yield
+    finally:
+        relay_task.cancel()
+        try:
+            await relay_task
+        except asyncio.CancelledError:
+            pass
+        log.info("api.shutdown")
+        await close_db()
 
 
 def create_app() -> FastAPI:

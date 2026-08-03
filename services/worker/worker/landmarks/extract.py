@@ -2,10 +2,12 @@
 
 MG-STUB: final — production implementation.
 """
+
 from __future__ import annotations
 
 import os
 import urllib.request
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 import numpy as np
@@ -36,7 +38,7 @@ class FaceFrame:
 
 
 def extract_landmarks_from_frames(
-    frames_bgr: list[np.ndarray],
+    frames_bgr: Iterable[np.ndarray],
     fps: float,
     min_confidence: float = 0.5,
 ) -> list[FaceFrame]:
@@ -102,7 +104,7 @@ def _decompose_pose(matrix) -> tuple[float, float, float]:
     return float(yaw), float(pitch), float(roll)
 
 
-def write_landmarks_npz(frames: list[FaceFrame], path: str) -> None:
+def write_landmarks_npz(frames: list[FaceFrame], path: str, fps: float = 30.0) -> None:
     """Write a compact binary landmarks file: header JSON + raw float32 array.
 
     Format:
@@ -126,38 +128,38 @@ def write_landmarks_npz(frames: list[FaceFrame], path: str) -> None:
             "shape": list(arr.shape),
             "dtype": "float32",
             "schema": "mediapipe-v1",
-            "fps": 30.0,
+            "fps": float(fps),
             "meta_shape": list(meta.shape),
         }
     ).encode()
-    with open(path, "wb") as f:
-        f.write(header + b"\n")
-        f.write(arr.tobytes())
-        f.write(meta.tobytes())
+    with open(path, "wb") as output:
+        output.write(header + b"\n")
+        output.write(arr.tobytes())
+        output.write(meta.tobytes())
 
 
 def normalize_landmarks(frames: list[FaceFrame]) -> np.ndarray:
     """Apply translation (subtract nose_tip) and scale (divide by eye distance).
 
-    Returns: np.ndarray shape (T, 33) — 11 motion points × 3 coords.
+    Returns: np.ndarray shape (T, 33) — 11 motion points x 3 coords.
     """
     if not frames:
         return np.zeros((0, 33), dtype=np.float32)
-    NOSE_TIP = 1
-    LEFT_EYE_OUTER = 33
-    RIGHT_EYE_OUTER = 263
-    MOTION_INDICES = (61, 291, 13, 14, 78, 308, 152, 234, 454, 50, 280)
+    nose_tip = 1
+    left_eye_outer = 33
+    right_eye_outer = 263
+    motion_indices = (61, 291, 13, 14, 78, 308, 152, 234, 454, 50, 280)
     out = np.zeros((len(frames), 33), dtype=np.float32)
     for i, fr in enumerate(frames):
-        if fr.confidence < 0.5 or fr.points_2d[NOSE_TIP].sum() == 0:
+        if fr.confidence < 0.5 or fr.points_2d[nose_tip].sum() == 0:
             continue
-        nose = fr.points_2d[NOSE_TIP]
-        le = fr.points_2d[LEFT_EYE_OUTER]
-        re = fr.points_2d[RIGHT_EYE_OUTER]
+        nose = fr.points_2d[nose_tip]
+        le = fr.points_2d[left_eye_outer]
+        re = fr.points_2d[right_eye_outer]
         scale = float(np.linalg.norm(re[:2] - le[:2]))
         if scale <= 1e-8:
             continue
-        for j, idx in enumerate(MOTION_INDICES):
+        for j, idx in enumerate(motion_indices):
             p = fr.points_2d[idx]
             out[i, j * 3 : j * 3 + 3] = (p - nose) / scale
     return out

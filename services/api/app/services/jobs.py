@@ -1,4 +1,5 @@
 """Analysis job service."""
+
 from __future__ import annotations
 
 import uuid
@@ -6,13 +7,15 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..db.models import AnalysisJob, User
+from ..db.models import AnalysisJob, LandmarkSequence, User
 from ..errors import ConflictError, NotFoundError, ValidationFailedError
 from ..events.outbox import OutboxRepository
 from ..observability import get_logger
 from ..repositories.assets import AssetRepository
 from ..repositories.jobs import AnalysisJobRepository, JobStageRepository
 from ..repositories.subjects import SubjectRepository
+from ..storage import BUCKET_DERIVED, BUCKET_VIDEOS
+from ..storage.s3_client import S3Client
 
 log = get_logger(__name__)
 
@@ -41,14 +44,14 @@ class JobService:
             raise ValidationFailedError("Asset is not READY")
         if asset.size_bytes <= 0:
             raise ValidationFailedError("Asset has no data")
+        if not asset.has_audio:
+            raise ValidationFailedError("Asset has no audio for speech alignment")
         # Validate subject + consent
         subject = await self.subjects.get(claimed_person_id)
         if subject is None or subject.deleted_at is not None:
             raise NotFoundError("Subject not found")
         if subject.consent_state != "GRANTED":
-            raise ValidationFailedError(
-                f"Subject consent is {subject.consent_state}, not GRANTED"
-            )
+            raise ValidationFailedError(f"Subject consent is {subject.consent_state}, not GRANTED")
 
         job = await self.jobs.create_or_get_idempotent(
             asset_id=asset_id,
@@ -95,14 +98,38 @@ class JobService:
         from ..db.models import Decision
 
         dec_stmt = (
-            select(Decision)
-            .where(Decision.job_id == job_id)
-            .order_by(desc(Decision.created_at))
-            .limit(1)
+            select(Decision).where(Decision.job_id == job_id).order_by(desc(Decision.created_at)).limit(1)
         )
         result = await self.session.execute(dec_stmt)
         decision = result.scalar_one_or_none()
         return {"job": job, "stages": stages, "decision": decision}
+
+    async def get_artifacts(self, job_id: uuid.UUID, s3: S3Client) -> dict:
+        job = await self.jobs.get(job_id)
+        if job is None:
+            raise NotFoundError("Job not found")
+        asset = await self.assets.get(job.asset_id)
+        if asset is None or asset.state != "READY":
+            raise NotFoundError("Analysis video is not available")
+        landmark_stmt = (
+            select(LandmarkSequence)
+            .where(
+                LandmarkSequence.job_id == job_id,
+                LandmarkSequence.tenant_id == self.tenant_id,
+            )
+            .order_by(LandmarkSequence.created_at.desc())
+            .limit(1)
+        )
+        landmarks = (await self.session.execute(landmark_stmt)).scalar_one_or_none()
+        return {
+            "video_url": await s3.generate_presigned_get(BUCKET_VIDEOS, asset.object_key),
+            "landmarks_url": (
+                await s3.generate_presigned_get(BUCKET_DERIVED, landmarks.object_key) if landmarks else None
+            ),
+            "duration_ms": int(asset.duration_ms or 0),
+            "fps": float(landmarks.source_fps if landmarks else asset.fps or 30.0),
+            "expires_in": 300,
+        }
 
     async def cancel(self, job_id: uuid.UUID) -> AnalysisJob:
         job = await self.jobs.get(job_id)
