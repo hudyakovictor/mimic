@@ -10,7 +10,7 @@ export function LoginPage() {
   const accessToken = useAuth((s) => s.accessToken);
   const push = useToasts((s) => s.push);
 
-  const [email, setEmail] = useState('admin@local');
+  const [email, setEmail] = useState('admin@example.com');
   const [password, setPassword] = useState('change-me-now-12chars');
   const [loading, setLoading] = useState(false);
 
@@ -21,7 +21,7 @@ export function LoginPage() {
     setLoading(true);
     try {
       const res = await api.login(email, password);
-      setSession(res.access_token, res.refresh_token, res.user);
+      setSession(res.accessToken, res.refreshToken, res.user);
       push({ message: 'Добро пожаловать', kind: 'success' });
       navigate(location.state?.from?.pathname ?? '/');
     } catch (e) {
@@ -84,7 +84,7 @@ export function LoginPage() {
           {loading ? 'Входим…' : 'Войти'}
         </button>
         <div className="muted text-xs" style={{ marginTop: 4 }}>
-          Default admin: admin@local / change-me-now-12chars
+          Default admin: admin@example.com / change-me-now-12chars
         </div>
       </form>
     </div>

@@ -81,7 +81,7 @@ async def seed() -> None:
                     id=uuid.uuid4(),
                     kind=kind,
                     version=version,
-                    artifact_checksum=hash(version),
+                    artifact_checksum=f"{hash(version):x}",
                     code_commit="initial",
                     feature_schema="motion-v1",
                     training_dataset_manifest={"sources": []},

@@ -91,18 +91,18 @@ export interface Subject {
 export interface Asset {
   id: string;
   sourceType: 'UPLOAD' | 'YOUTUBE' | 'URL' | 'CLIP';
-  sourceUrl?: string;
+  sourceUrl: string | null;
   mime: string;
   sizeBytes: number;
-  sha256?: string;
-  durationMs?: number;
-  width?: number;
-  height?: number;
-  fps?: number;
+  sha256: string | null;
+  durationMs: number | null;
+  width: number | null;
+  height: number | null;
+  fps: number | null;
   hasAudio: boolean;
   state: AssetState;
-  title?: string;
-  failureReason?: string;
+  title: string | null;
+  failureReason: string | null;
   extra: Record<string, unknown>;
   createdAt: string;
 }
@@ -207,6 +207,6 @@ export interface DashboardMetrics {
   qualityOkRatio: number;
   medianProcessingSeconds: number;
   reviewerAgreement: number;
-  jobsLast7d: Array<{ date: string; count: number; suspicious: number }>;
+  jobsLast7D: Array<{ date: string; count: number; suspicious: number }>;
   recentAnalyses: AnalysisJob[];
 }

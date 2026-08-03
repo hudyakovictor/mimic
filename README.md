@@ -41,8 +41,11 @@ React Admin (apps/admin)  ──►  FastAPI (services/api)  ──►  PostgreS
 
 ## Запуск
 
+Виртуальное окружение: `.venv` (Python 3.12).
+
 ```bash
 # 1. Зависимости
+uv venv .venv --python 3.12
 uv sync --all-extras
 cd apps/admin && pnpm install && cd ../..
 
@@ -67,7 +70,7 @@ PYTHONPATH=services/api:services/worker:. uv run dramatiq worker.__main__ -p 2 -
 cd apps/admin && pnpm dev   # http://localhost:5173
 ```
 
-Default admin: `admin@local` / `change-me-now-12chars`.
+Default admin: `admin@example.com` / `change-me-now-12chars`.
 
 ## Структура проекта
 

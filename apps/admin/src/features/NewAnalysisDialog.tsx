@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQueryClient } from '@tanstack/react-query';
 import { api, ApiError } from '../api/client';
 import { useToasts } from '../stores/auth';
 import type { AnalysisJob, Asset } from '../types';
@@ -19,7 +19,8 @@ export function NewAnalysisDialog({
   const [title, setTitle] = useState('');
   const [file, setFile] = useState<File | null>(null);
   const [url, setUrl] = useState('');
-  const [subjectId, setSubjectId] = useState('');
+  // System default subject — always used, field hidden from UI
+  const subjectId = '00000000-0000-0000-0000-000000000001';
   const [phase, setPhase] = useState<Phase>('compose');
   const [progress, setProgress] = useState(0);
   const [errMsg, setErrMsg] = useState<string | null>(null);
@@ -28,16 +29,6 @@ export function NewAnalysisDialog({
   const localPreviewRef = useRef<string | null>(null);
   const push = useToasts((state) => state.push);
   const queryClient = useQueryClient();
-
-  const { data: subjects = [] } = useQuery({
-    queryKey: ['subjects'],
-    queryFn: () => api.listSubjects(),
-  });
-
-  useEffect(() => {
-    const firstGranted = subjects.find((subject) => subject.consentState === 'GRANTED');
-    if (!subjectId && firstGranted) setSubjectId(firstGranted.id);
-  }, [subjects, subjectId]);
 
   useEffect(
     () => () => {
@@ -63,10 +54,6 @@ export function NewAnalysisDialog({
   const submitSource = async (event: React.FormEvent) => {
     event.preventDefault();
     setErrMsg(null);
-    if (!subjectId) {
-      setErrMsg('Выберите субъекта с подтверждённым согласием.');
-      return;
-    }
     try {
       let asset: Asset;
       if (mode === 'upload') {
@@ -184,7 +171,7 @@ export function NewAnalysisDialog({
         <div className="card clip-editor-dialog" onClick={(event) => event.stopPropagation()}>
           <ClipEditor
             videoUrl={previewUrl}
-            knownDurationMs={sourceAsset?.durationMs}
+            knownDurationMs={sourceAsset?.durationMs ?? undefined}
             sourceSizeBytes={sourceAsset?.sizeBytes}
             busy={phase === 'clipping'}
             onBack={() => setPhase('compose')}
@@ -245,22 +232,9 @@ export function NewAnalysisDialog({
             </div>
           )}
 
-          <div className="grid grid--2">
-            <div className="field">
-              <label>Название</label>
-              <input className="input" placeholder="Например, интервью 30 июля" value={title} onChange={(event) => setTitle(event.target.value)} />
-            </div>
-            <div className="field">
-              <label>Заявленный человек</label>
-              <select className="select" value={subjectId} onChange={(event) => setSubjectId(event.target.value)} required>
-                <option value="">— выберите —</option>
-                {subjects.map((subject) => (
-                  <option key={subject.id} value={subject.id} disabled={subject.consentState !== 'GRANTED'}>
-                    {subject.displayName || subject.externalId} · {subject.consentState === 'GRANTED' ? 'согласие есть' : 'нет согласия'}
-                  </option>
-                ))}
-              </select>
-            </div>
+          <div className="field">
+            <label>Название</label>
+            <input className="input" placeholder="Например, интервью 30 июля" value={title} onChange={(event) => setTitle(event.target.value)} />
           </div>
 
           {phase === 'uploading' && (
@@ -282,7 +256,7 @@ export function NewAnalysisDialog({
 
           <div className="row gap-2 mt-3" style={{ justifyContent: 'flex-end' }}>
             <button type="button" className="btn btn--secondary" onClick={onClose} disabled={busy}>Отмена</button>
-            <button type="submit" className="btn" disabled={busy || !subjectId}>
+            <button type="submit" className="btn" disabled={busy}>
               {phase === 'uploading' ? 'Загрузка…' : phase === 'importing' ? 'Импорт…' : phase === 'failed' ? 'Повторить' : 'Продолжить к выбору участков →'}
             </button>
           </div>

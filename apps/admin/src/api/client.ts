@@ -24,6 +24,7 @@ async function request<T>(
   path: string,
   schema: z.ZodType<T> | null,
   init?: RequestInitWithExtras,
+  retryCount = 0,
 ): Promise<T> {
   const headers: Record<string, string> = {
     ...(init?.headers as Record<string, string> | undefined),
@@ -44,6 +45,28 @@ async function request<T>(
       throw new ApiError(res.status, 'unknown', text || res.statusText, corrId);
     }
     return res as unknown as T;
+  }
+  if (res.status === 401 && retryCount === 0) {
+    // Try to refresh token
+    const refreshToken = localStorage.getItem('refresh_token');
+    if (refreshToken) {
+      try {
+        const refreshRes = await fetch(`${API_BASE}/v1/auth/refresh`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ refresh_token: refreshToken }),
+        });
+        if (refreshRes.ok) {
+          const data = await refreshRes.json();
+          localStorage.setItem('access_token', data.accessToken);
+          localStorage.setItem('refresh_token', data.refreshToken);
+          // Retry original request with new token
+          return request(path, schema, init, 1);
+        }
+      } catch {
+        // Refresh failed, will throw below
+      }
+    }
   }
   if (!res.ok) {
     let body: any = {};
@@ -88,10 +111,10 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ email, password }),
     }) as Promise<{
-      access_token: string;
-      refresh_token: string;
-      token_type: string;
-      expires_in: number;
+      accessToken: string;
+      refreshToken: string;
+      tokenType: string;
+      expiresIn: number;
       user: z.infer<typeof CurrentUserSchema>;
     }>,
 
@@ -99,7 +122,7 @@ export const api = {
     request('/v1/auth/refresh', null, {
       method: 'POST',
       body: JSON.stringify({ refresh_token: refreshToken }),
-    }) as Promise<{ access_token: string; refresh_token: string; expires_in: number }>,
+    }) as Promise<{ accessToken: string; refreshToken: string; expiresIn: number }>,
 
   me: () => request('/v1/auth/me', CurrentUserSchema) as Promise<z.infer<typeof CurrentUserSchema>>,
 

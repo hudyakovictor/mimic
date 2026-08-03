@@ -45,7 +45,7 @@ export function DashboardPage() {
   if (!data) return null;
 
   const m = data;
-  const max = Math.max(1, ...m.jobsLast7d.map((d) => d.count));
+  const max = Math.max(1, ...m.jobsLast7D.map((d) => d.count));
   const median = m.medianProcessingSeconds
     ? m.medianProcessingSeconds < 60
       ? `${Math.round(m.medianProcessingSeconds)} сек`
@@ -105,12 +105,12 @@ export function DashboardPage() {
           </div>
           <div className="panel__body">
             <div style={{ display: 'flex', alignItems: 'flex-end', gap: 8, height: 160 }}>
-              {m.jobsLast7d.length === 0 ? (
+              {m.jobsLast7D.length === 0 ? (
                 <div className="empty" style={{ flex: 1 }}>
                   <div className="empty__title">Нет данных</div>
                 </div>
               ) : (
-                m.jobsLast7d.map((d) => (
+                m.jobsLast7D.map((d) => (
                   <div key={d.date} style={{ flex: 1, display: 'grid', placeItems: 'center' }}>
                     <div
                       style={{
